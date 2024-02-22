@@ -67,15 +67,19 @@ func serveFixture(ctx context.Context, factory messaging.SessionFactory) {
 
 	go func() {
 		var managers []*eventsource.Manager
-		manageCtx, manageCancel := context.WithCancel(ctx)
-		defer manageCancel()
+		var (
+			manageCtx    context.Context
+			manageCancel context.CancelFunc
+		)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case config := <-reconfigure:
 				slog.Info("reconfigure received. stopping managers.")
-				manageCancel()
+				if manageCancel != nil {
+					manageCancel()
+				}
 				statusMu.Lock()
 				status = "reconfiguring"
 				statusMu.Unlock()

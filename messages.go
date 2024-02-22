@@ -16,6 +16,8 @@ var (
 	recordSubject    = "RECORD"
 )
 
+// Decode a raw amqp message into one of BeaconMessage, FlushMessage,
+// HeartbeatMessage or RecordMessage.
 func Decode(msg *amqp.Message) (interface{}, error) {
 	if msg == nil || msg.Properties == nil {
 		return nil, errors.New("cannot decode message with nil properties")

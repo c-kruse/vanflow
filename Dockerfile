@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o ./vanflow-tool ./cmd
+RUN go build  ./cmd/vanflow-tool
 
 FROM alpine:latest
 

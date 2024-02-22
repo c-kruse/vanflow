@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/c-kruse/vanflow"
-	"github.com/c-kruse/vanflow/messaging"
 	"gotest.tools/assert"
 	"gotest.tools/poll"
 )
@@ -16,7 +15,7 @@ func TestDiscoveryBasic(t *testing.T) {
 	t.Parallel()
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
-	factory := messaging.NewMockConnectionFactory(t, "mockamqp://local")
+	factory := NewMockConnectionFactory(t, "mockamqp://local")
 
 	discovery := NewDiscovery(factory)
 
@@ -133,7 +132,7 @@ func TestDiscoveryWatch(t *testing.T) {
 	t.Parallel()
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
-	factory := messaging.NewMockConnectionFactory(t, "mockamqp://local")
+	factory := NewMockConnectionFactory(t, "mockamqp://local")
 
 	discovery := NewDiscovery(factory)
 

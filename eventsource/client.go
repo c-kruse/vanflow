@@ -193,6 +193,7 @@ func listen(ctx context.Context, factory messaging.SessionFactory, address strin
 					if err != nil {
 						return fmt.Errorf("error accepting beacon message: %w", err)
 					}
+					b.Reset()
 					msgs <- msg
 				}
 			}()

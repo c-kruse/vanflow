@@ -1,3 +1,6 @@
+// store contains an interface for accumulating and accessing vanflow record
+// state, as well as an in memory cache implementation that stores records in a
+// synchronized map.
 package store
 
 import (

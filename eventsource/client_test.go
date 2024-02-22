@@ -8,7 +8,6 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 	"github.com/c-kruse/vanflow"
-	"github.com/c-kruse/vanflow/messaging"
 	"gotest.tools/assert"
 )
 
@@ -16,7 +15,7 @@ func TestClient(t *testing.T) {
 	t.Parallel()
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
-	factory := messaging.NewMockConnectionFactory(t, "mockamqp://local")
+	factory := NewMockConnectionFactory(t, "mockamqp://local")
 
 	client := NewClient(factory, Info{
 		ID:      "test",
@@ -87,7 +86,7 @@ func TestClientFlush(t *testing.T) {
 	t.Parallel()
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
-	factory := messaging.NewMockConnectionFactory(t, "mockamqp://local")
+	factory := NewMockConnectionFactory(t, "mockamqp://local")
 
 	client := NewClient(factory, Info{
 		ID:      "test",
