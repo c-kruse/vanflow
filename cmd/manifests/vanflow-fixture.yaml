@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vanflow-fixture
+  labels:
+    app: vanflow-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vanflow-fixture
+  template:
+    metadata:
+      labels:
+        app: vanflow-fixture
+    spec:
+      containers:
+      - image: quay.io/ckruse/vanflow-tool:latest
+        imagePullPolicy: Always
+        name: main
+        securityContext:
+          runAsNonRoot: true
+        volumeMounts:
+        - mountPath: /etc/messaging/
+          name: skupper-local-client
+        args:
+        - '-messaging-config=/etc/messaging/connect.json'
+        - 'fixture'
+      volumes:
+      - name: skupper-local-client
+        secret:
+          defaultMode: 420
+          secretName: skupper-local-client

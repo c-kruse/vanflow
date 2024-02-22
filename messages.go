@@ -4,15 +4,27 @@ import (
 	"errors"
 	"fmt"
 
+	amqp "github.com/Azure/go-amqp"
 	"github.com/c-kruse/vanflow/encoding"
-	"github.com/interconnectedcloud/go-amqp"
+)
+
+var (
+	beaconAddress    = "mc/sfe.all"
+	beaconSubject    = "BEACON"
+	heartbeatSubject = "HEARTBEAT"
+	flushSubject     = "FLUSH"
+	recordSubject    = "RECORD"
 )
 
 func Decode(msg *amqp.Message) (interface{}, error) {
 	if msg == nil || msg.Properties == nil {
 		return nil, errors.New("cannot decode message with nil properties")
 	}
-	switch msg.Properties.Subject {
+	if msg.Properties.Subject == nil {
+		return nil, errors.New("cannot decode message without subject")
+	}
+	subject := *msg.Properties.Subject
+	switch subject {
 	case "BEACON":
 		return DecodeBeacon(msg), nil
 	case "HEARTBEAT":
@@ -22,7 +34,7 @@ func Decode(msg *amqp.Message) (interface{}, error) {
 	case "RECORD":
 		return DecodeRecord(msg)
 	default:
-		return nil, fmt.Errorf("cannot decode message with subject %q", msg.Properties.Subject)
+		return nil, fmt.Errorf("cannot decode message with subject %q", subject)
 	}
 }
 
@@ -37,9 +49,15 @@ type BeaconMessage struct {
 
 func DecodeBeacon(msg *amqp.Message) BeaconMessage {
 	var m BeaconMessage
-	m.To = msg.Properties.To
-	m.Subject = msg.Properties.Subject
-	m.ReplyTo = msg.Properties.ReplyTo
+	if msg.Properties.To != nil {
+		m.To = *msg.Properties.To
+	}
+	if msg.Properties.Subject != nil {
+		m.Subject = *msg.Properties.Subject
+	}
+	if msg.Properties.ReplyTo != nil {
+		m.ReplyTo = *msg.Properties.ReplyTo
+	}
 	if version, ok := msg.ApplicationProperties["v"].(uint32); ok {
 		m.Version = version
 	}
@@ -61,8 +79,8 @@ func DecodeBeacon(msg *amqp.Message) BeaconMessage {
 func (m BeaconMessage) Encode() *amqp.Message {
 	return &amqp.Message{
 		Properties: &amqp.MessageProperties{
-			To:      "mc/sfe.all",
-			Subject: "BEACON",
+			To:      &beaconAddress,
+			Subject: &beaconSubject,
 		},
 		ApplicationProperties: map[string]interface{}{
 			"v":          m.Version,
@@ -89,8 +107,12 @@ type HeartbeatMessage struct {
 
 func DecodeHeartbeat(msg *amqp.Message) HeartbeatMessage {
 	var m HeartbeatMessage
-	m.To = msg.Properties.To
-	m.Subject = msg.Properties.Subject
+	if msg.Properties.To != nil {
+		m.To = *msg.Properties.To
+	}
+	if msg.Properties.Subject != nil {
+		m.Subject = *msg.Properties.Subject
+	}
 
 	if version, ok := msg.ApplicationProperties["v"].(uint32); ok {
 		m.Version = version
@@ -105,10 +127,11 @@ func DecodeHeartbeat(msg *amqp.Message) HeartbeatMessage {
 }
 
 func (m HeartbeatMessage) Encode() *amqp.Message {
+	target := "mc/sfe." + m.Identity
 	return &amqp.Message{
 		Properties: &amqp.MessageProperties{
-			To:      "mc/sfe." + m.Identity,
-			Subject: "HEARTBEAT",
+			To:      &target,
+			Subject: &heartbeatSubject,
 		},
 		ApplicationProperties: map[string]interface{}{
 			"v":   m.Version,
@@ -124,18 +147,24 @@ type FlushMessage struct {
 
 func DecodeFlush(msg *amqp.Message) FlushMessage {
 	var flush FlushMessage
-	flush.To = msg.Properties.To
-	flush.Subject = msg.Properties.Subject
-	flush.ReplyTo = msg.Properties.ReplyTo
+	if msg.Properties.To != nil {
+		flush.To = *msg.Properties.To
+	}
+	if msg.Properties.Subject != nil {
+		flush.Subject = *msg.Properties.Subject
+	}
+	if msg.Properties.ReplyTo != nil {
+		flush.ReplyTo = *msg.Properties.ReplyTo
+	}
 	return flush
 }
 
 func (m FlushMessage) Encode() *amqp.Message {
 	return &amqp.Message{
 		Properties: &amqp.MessageProperties{
-			To:      m.To,
-			ReplyTo: m.ReplyTo,
-			Subject: "FLUSH",
+			To:      &m.To,
+			ReplyTo: &m.ReplyTo,
+			Subject: &flushSubject,
 		},
 	}
 }
@@ -146,8 +175,12 @@ type RecordMessage struct {
 }
 
 func DecodeRecord(msg *amqp.Message) (record RecordMessage, err error) {
-	record.To = msg.Properties.To
-	record.Subject = msg.Properties.Subject
+	if msg.Properties.To != nil {
+		record.To = *msg.Properties.To
+	}
+	if msg.Properties.Subject != nil {
+		record.Subject = *msg.Properties.Subject
+	}
 	record.Records, err = decodeRecords(msg)
 	return record, err
 }
@@ -163,8 +196,8 @@ func (m RecordMessage) Encode() (*amqp.Message, error) {
 	}
 	return &amqp.Message{
 		Properties: &amqp.MessageProperties{
-			To:      m.To,
-			Subject: "RECORD",
+			To:      &m.To,
+			Subject: &recordSubject,
 		},
 		Value: records,
 	}, nil

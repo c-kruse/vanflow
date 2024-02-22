@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vanflow-logging
+  labels:
+    app: vanflow-logging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vanflow-logging
+  template:
+    metadata:
+      labels:
+        app: vanflow-logging
+    spec:
+      containers:
+      - image: quay.io/ckruse/vanflow-tool:latest
+        imagePullPolicy: Always
+        name: main
+        securityContext:
+          runAsNonRoot: true
+        volumeMounts:
+        - mountPath: /etc/messaging/
+          name: skupper-local-client
+        args:
+        - '-messaging-config=/etc/messaging/connect.json'
+        - '-include-flow-records=false'
+        - '-debug'
+        - 'log'
+      volumes:
+      - name: skupper-local-client
+        secret:
+          defaultMode: 420
+          secretName: skupper-local-client

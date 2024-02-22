@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/interconnectedcloud/go-amqp"
+	amqp "github.com/Azure/go-amqp"
 	"gotest.tools/assert"
 )
 
@@ -47,7 +47,7 @@ func TestDecode(t *testing.T) {
 			Error: "cannot decode message",
 		}, {
 			Name:  "unknown subject",
-			In:    &amqp.Message{Properties: &amqp.MessageProperties{Subject: "A"}},
+			In:    &amqp.Message{Properties: &amqp.MessageProperties{Subject: ptrTo("A")}},
 			Error: "cannot decode message",
 		}, {
 			Name: "emtpy record",
@@ -117,8 +117,8 @@ func TestBeaconMessage(t *testing.T) {
 		Identity:   "id",
 	}
 	msg := original.Encode()
-	assert.Equal(t, msg.Properties.Subject, "BEACON")
-	assert.Equal(t, msg.Properties.To, "mc/sfe.all")
+	assert.Equal(t, *msg.Properties.Subject, "BEACON")
+	assert.Equal(t, *msg.Properties.To, "mc/sfe.all")
 	dup := DecodeBeacon(msg)
 	dup.MessageProps = MessageProps{}
 	assert.DeepEqual(t, original, dup)
