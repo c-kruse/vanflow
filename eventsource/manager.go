@@ -79,7 +79,7 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) sendRecords(ctx context.Context) {
-	b := defaultBackOff(ctx)
+	b := backoffRetryForever(ctx)
 	backoff.Retry(func() error {
 		conn, err := m.factory.Create(ctx)
 		if err != nil {
@@ -250,9 +250,6 @@ func (m *Manager) sendKeepalives(ctx context.Context) {
 		heartbeatInterval = 2 * time.Second
 	}
 
-	beaconTimer := time.NewTicker(beaconInterval)
-	heartbeatTimer := time.NewTicker(heartbeatInterval)
-
 	beaconMessage := vanflow.BeaconMessage{
 		Version:    uint32(m.Source.Version),
 		SourceType: m.Source.Type,
@@ -271,7 +268,7 @@ func (m *Manager) sendKeepalives(ctx context.Context) {
 		heartbeatAddr = heartbeatAddr + sourceSuffixHeartbeats
 	}
 	sendSettled := &amqp.SenderOptions{SettlementMode: amqp.SenderSettleModeSettled.Ptr()}
-	b := defaultBackOff(ctx)
+	b := backoffRetryForever(ctx)
 	backoff.Retry(func() error {
 		conn, err := m.factory.Create(ctx)
 		if err != nil {
@@ -296,32 +293,45 @@ func (m *Manager) sendKeepalives(ctx context.Context) {
 			slog.Error("error sending initial beacon message", slog.Any("error", err))
 			return err
 		}
-		hearbeatTimeouts := 0
+
+		messageDeliveryTimeout := heartbeatInterval
+		if messageDeliveryTimeout > beaconInterval {
+			messageDeliveryTimeout = beaconInterval
+		}
+
+		beaconTimer := time.NewTicker(beaconInterval)
+		heartbeatTimer := time.NewTicker(heartbeatInterval)
+		heartbeatTimeouts := 0
+		firstHeartbeatSent := false
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
 			case <-beaconTimer.C:
 				msg := beaconMessage.Encode()
-				if err := sendWithTimeout(ctx, beaconInterval, beaconSender, msg); err != nil {
+				if err := sendWithTimeout(ctx, messageDeliveryTimeout, beaconSender, msg); err != nil {
 					slog.Error("error sending event source beacon", slog.Any("error", err))
 					return err
 				}
+				b.Reset()
 			case <-heartbeatTimer.C:
 				heartbeatMessage.Now = uint64(time.Now().UnixMicro())
 				msg := heartbeatMessage.Encode()
-				if err := sendWithTimeout(ctx, heartbeatInterval, heartbeatSender, msg); err != nil {
-					// skupper router will block messages sent multicast
-					// without a listener by default. It needs to register a
-					// beacon first before heartbeats will pass.
-					if errors.Is(err, errSendTimeoutExceeded) && hearbeatTimeouts < 3 {
-						hearbeatTimeouts++
+				// skupper router will block messages sent multicast without a
+				// listener by default. The router needs to register a beacon
+				// before heartbeats are unblocked. This doesn't seem entirely
+				// reliable so I've opted to ignore the first few heartbeat
+				// timeouts before aborting the connection entirely.
+				if err := sendWithTimeout(ctx, messageDeliveryTimeout, heartbeatSender, msg); err != nil {
+					if errors.Is(err, errSendTimeoutExceeded) && heartbeatTimeouts < 3 && !firstHeartbeatSent {
+						heartbeatTimeouts++
 						slog.Info("heartbeat message send timed out")
 						continue
 					}
 					slog.Error("error sending event source heartbeat", slog.Any("error", err))
 					return err
 				}
+				firstHeartbeatSent = true
 			}
 		}
 	}, b)
@@ -375,10 +385,11 @@ func nextN[T any](ctx context.Context, c <-chan T, n int) []T {
 	}
 }
 
-func defaultBackOff(ctx context.Context) backoff.BackOffContext {
+func backoffRetryForever(ctx context.Context) backoff.BackOffContext {
 	exp := backoff.NewExponentialBackOff()
 	exp.InitialInterval = 100 * time.Millisecond
 	exp.MaxInterval = 30 * time.Second
 	exp.MaxElapsedTime = 0
+	exp.Reset()
 	return backoff.WithContext(exp, ctx)
 }

@@ -168,7 +168,7 @@ func listen(ctx context.Context, factory messaging.SessionFactory, address strin
 	msgs := make(chan *amqp.Message, 32)
 	go func() {
 		defer close(msgs)
-		b := defaultBackOff(ctx)
+		b := backoffRetryForever(ctx)
 		backoff.Retry(func() error {
 			err := func() error {
 				if err := ctx.Err(); err != nil {
@@ -189,15 +189,17 @@ func listen(ctx context.Context, factory messaging.SessionFactory, address strin
 					if err != nil {
 						return fmt.Errorf("error receiving beacon message: %w", err)
 					}
+					msgs <- msg
 					err = recv.AcceptMessage(ctx, msg)
 					if err != nil {
 						return fmt.Errorf("error accepting beacon message: %w", err)
 					}
 					b.Reset()
-					msgs <- msg
 				}
 			}()
-
+			if err := ctx.Err(); err != nil {
+				return nil
+			}
 			slog.Error("tearing down connection due to error", slog.Any("error", err), slog.String("address", address))
 			return err
 		}, b)
