@@ -177,7 +177,12 @@ func TestDiscoveryWatch(t *testing.T) {
 	event := <-discoveredOut
 
 	// start a new watched client and begin listening
-	client, err := discovery.NewWatchClient(tstCtx, WatchConfig{ID: event.ID, Timeout: time.Millisecond * 250, GracePeriod: time.Second})
+	client, err := discovery.NewWatchClient(tstCtx, WatchConfig{
+		ID:                      event.ID,
+		Timeout:                 time.Millisecond * 250,
+		GracePeriod:             time.Second,
+		DiscoveryUpdateInterval: time.Millisecond * 10,
+	})
 	assert.Check(t, err)
 
 	listenCtx, listenCancel := context.WithCancel(tstCtx)
@@ -194,7 +199,7 @@ func TestDiscoveryWatch(t *testing.T) {
 				return poll.Success()
 			}
 			return poll.Continue("waiting for lastseen to advance")
-		}, poll.WithTimeout(5*time.Second),
+		}, poll.WithDelay(time.Millisecond*5), poll.WithTimeout(5*time.Second),
 	)
 
 	listenCancel()
