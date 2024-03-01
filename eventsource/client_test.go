@@ -8,6 +8,7 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 	"github.com/c-kruse/vanflow"
+	"github.com/c-kruse/vanflow/messaging"
 	"gotest.tools/assert"
 )
 
@@ -17,10 +18,10 @@ func TestClient(t *testing.T) {
 	defer tstCancel()
 	factory := NewMockConnectionFactory(t, "mockamqp://local")
 
-	client := NewClient(factory, Info{
+	client := NewClient(factory, ClientConfig{Source: Info{
 		ID:      "test",
 		Address: "mc/sfe.test",
-	})
+	}})
 	heartbeats := make(chan vanflow.HeartbeatMessage, 8)
 	records := make(chan vanflow.RecordMessage, 8)
 	client.OnHeartbeat(func(m vanflow.HeartbeatMessage) { heartbeats <- m })
@@ -83,33 +84,108 @@ func TestClient(t *testing.T) {
 }
 
 func TestClientFlush(t *testing.T) {
-	t.Parallel()
-	tstCtx, tstCancel := context.WithCancel(context.Background())
-	defer tstCancel()
 	factory := NewMockConnectionFactory(t, "mockamqp://local")
 
-	client := NewClient(factory, Info{
-		ID:      "test",
-		Address: "mc/sfe.test",
-		Direct:  "sfe.test",
-	})
-	tstConn, _ := factory.Create(tstCtx)
-	receiver, _ := tstConn.Receiver(tstCtx, "sfe.test", &amqp.ReceiverOptions{Credit: 64})
+	testCases := []struct {
+		ClientName string
+		When       func(t *testing.T, ctx context.Context, client *Client)
+		Expect     func(t *testing.T, ctx context.Context, flushMsg <-chan *amqp.Message)
+	}{
+		{
+			ClientName: "flush",
+			When: func(t *testing.T, ctx context.Context, client *Client) {
+				assert.Check(t, client.SendFlush(ctx))
+			},
+			Expect: func(t *testing.T, ctx context.Context, flushMsg <-chan *amqp.Message) {
+				select {
+				case <-time.After(time.Millisecond * 500):
+					t.Errorf("expected flush message")
+				case msg := <-flushMsg:
+					assert.Equal(t, *msg.Properties.Subject, "FLUSH")
+				}
+			},
+		}, {
+			ClientName: "noop",
+			When: func(t *testing.T, ctx context.Context, client *Client) {
+			},
+			Expect: func(t *testing.T, ctx context.Context, flushMsg <-chan *amqp.Message) {
+				select {
+				case <-time.After(time.Millisecond * 200):
+				case msg := <-flushMsg:
+					t.Errorf("unexpected flush message: %v", msg)
+				}
+			},
+		}, {
+			ClientName: "flush-on-first-message",
+			When: func(t *testing.T, ctx context.Context, client *Client) {
+				tstConn, _ := factory.Create(ctx)
+				sender, _ := tstConn.Sender(ctx, "mc/sfe.flush-on-first-message", nil)
+				go sendHeartbeatMessagesTo(t, ctx, sender)
+				assert.Check(t, client.Listen(ctx, FromSourceAddress()))
+				assert.Check(t, FlushOnFirstMessage(ctx, client))
+			},
+			Expect: func(t *testing.T, ctx context.Context, flushMsg <-chan *amqp.Message) {
+				select {
+				case <-time.After(time.Millisecond * 100):
+					t.Errorf("expected flush message")
+				case msg := <-flushMsg:
+					assert.Equal(t, *msg.Properties.Subject, "FLUSH")
+				}
+			},
+		}, {
+			ClientName: "flush-on-first-message-timeout",
+			When: func(t *testing.T, ctx context.Context, client *Client) {
+				flushCtx, cancel := context.WithTimeout(ctx, time.Millisecond*10)
+				defer cancel()
+				err := FlushOnFirstMessage(flushCtx, client)
+				assert.Assert(t, err != nil)
+			},
+			Expect: func(t *testing.T, ctx context.Context, flushMsg <-chan *amqp.Message) {
+				select {
+				case <-time.After(time.Millisecond * 200):
+				case msg := <-flushMsg:
+					t.Errorf("unexpected flush message: %v", msg)
+				}
+			},
+		},
+	}
+	for _, _tc := range testCases {
+		tc := _tc
+		t.Run(tc.ClientName, func(t *testing.T) {
+			t.Parallel()
+			tstCtx, tstCancel := context.WithCancel(context.Background())
+			defer tstCancel()
+			client := NewClient(factory, ClientConfig{Source: Info{
+				ID:      tc.ClientName,
+				Address: "mc/sfe." + tc.ClientName,
+				Direct:  "sfe." + tc.ClientName,
+			}})
+			tstConn, _ := factory.Create(tstCtx)
+			receiver, _ := tstConn.Receiver(tstCtx, "sfe."+tc.ClientName, &amqp.ReceiverOptions{Credit: 1})
 
-	flush := make(chan *amqp.Message, 1)
-	go func() {
-		msg, err := receiver.Receive(tstCtx, nil)
-		assert.Check(t, err)
-		flush <- msg
-	}()
-
-	assert.Check(t, client.SendFlush(tstCtx))
-
-	select {
-	case <-time.After(time.Millisecond * 500):
-		t.Errorf("expected flush message")
-	case msg := <-flush:
-		assert.Equal(t, *msg.Properties.Subject, "FLUSH")
+			flush := make(chan *amqp.Message)
+			go func() {
+				for {
+					msg, err := receiver.Receive(tstCtx, nil)
+					assert.Check(t, err)
+					flush <- msg
+				}
+			}()
+			tc.When(t, tstCtx, client)
+			tc.Expect(t, tstCtx, flush)
+		})
 	}
 
+}
+
+func sendHeartbeatMessagesTo(t *testing.T, ctx context.Context, sender messaging.Sender) {
+	t.Helper()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Millisecond):
+			assert.Check(t, sender.Send(ctx, vanflow.HeartbeatMessage{}.Encode(), nil))
+		}
+	}
 }

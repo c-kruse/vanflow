@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -124,16 +125,6 @@ func serveRecords(ctx context.Context, factory messaging.SessionFactory) {
 			dispatcher := dispatchReg.NewDispatcher(sourceRef)
 
 			client.OnRecord(dispatcher.Dispatch)
-			flushOnce := sync.OnceFunc(func() {
-				if err := client.SendFlush(ctx); err != nil {
-					slog.Error("failed to send FLUSH to source", slog.Any("error", err))
-					return
-				}
-				slog.Debug("flush sent", slog.Any("source", source))
-			})
-			client.OnHeartbeat(func(_ vanflow.HeartbeatMessage) {
-				flushOnce()
-			})
 			if err = client.Listen(ctx, eventsource.FromSourceAddress()); err != nil {
 				slog.Error("error starting listener", slog.Any("error", err))
 			}
@@ -152,6 +143,19 @@ func serveRecords(ctx context.Context, factory messaging.SessionFactory) {
 					slog.Error("error starting controller heartbeat listener", slog.Any("error", err))
 				}
 			}
+			go func() {
+				flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				err := eventsource.FlushOnFirstMessage(flushCtx, client)
+				if err != nil && errors.Is(err, flushCtx.Err()) {
+					err = client.SendFlush(ctx)
+				}
+				if err != nil {
+					slog.Error("failed to send FLUSH to source", slog.Any("error", err))
+					return
+				}
+				slog.Debug("flush sent", slog.Any("source", source))
+			}()
 		},
 		Forgotten: func(source eventsource.Info) {
 			slog.Debug("source forgotten", slog.Any("source", source))

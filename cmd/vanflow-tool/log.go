@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/c-kruse/vanflow"
@@ -55,19 +55,19 @@ func logOnly(ctx context.Context, factory messaging.SessionFactory) {
 				client.OnRecord(recordHandler)
 			}
 			if FlushOnDiscover {
-				flushOnce := sync.OnceFunc(func() {
-					if err := client.SendFlush(ctx); err != nil {
-						slog.Error("failed to send FLUSH to source", "error", err)
+				go func() {
+					flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+					err := eventsource.FlushOnFirstMessage(flushCtx, client)
+					if err != nil && errors.Is(err, flushCtx.Err()) {
+						err = client.SendFlush(ctx)
+					}
+					if err != nil {
+						slog.Error("failed to send FLUSH to source", slog.Any("error", err))
 						return
 					}
-					slog.Debug("flush sent", "source", source)
-				})
-				client.OnHeartbeat(func(_ vanflow.HeartbeatMessage) {
-					flushOnce()
-				})
-				client.OnRecord(func(_ vanflow.RecordMessage) {
-					flushOnce()
-				})
+					slog.Debug("flush sent", slog.Any("source", source))
+				}()
 			}
 			if err = client.Listen(ctx, eventsource.FromSourceAddress()); err != nil {
 				slog.Error("error starting listener", "error", err)
