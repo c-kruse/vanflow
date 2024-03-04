@@ -1,3 +1,7 @@
+// session implements amqp connection and session management though the concept
+// of a Container, inspired by the Conatiner interface exposed by the qpid
+// proton amqp libraries. This abstraction allows vanflow components to be
+// written without repeating connection management tasks.
 package session
 
 import (
