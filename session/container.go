@@ -144,6 +144,7 @@ func (c *container) Start(ctx context.Context) {
 				prevSessionTeardown()
 				prevSessionTeardown = func() {
 					sess.Close(ctx)
+					conn.Close()
 				}
 
 				for {
@@ -166,6 +167,7 @@ func (c *container) Start(ctx context.Context) {
 				slog.Error("session error triggered restart", slog.String("delay", d.String()), slog.Any("error", err))
 			},
 		)
+		defer prevSessionTeardown()
 		if err != nil {
 			if errors.Is(err, ctx.Err()) {
 				return
@@ -380,7 +382,7 @@ func (r *link) Close(ctx context.Context) error {
 	defer r.mu.Unlock()
 	r.closed = true
 	rcv := r.rcv
-	r.curr, r.rcv = nil, nil
+	r.curr, r.rcv, r.snd = nil, nil, nil
 	if rcv != nil {
 		return rcv.Close(ctx)
 	}

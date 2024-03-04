@@ -12,12 +12,11 @@ import (
 
 	"github.com/c-kruse/vanflow"
 	"github.com/c-kruse/vanflow/eventsource"
-	"github.com/c-kruse/vanflow/messaging"
 	"github.com/c-kruse/vanflow/store"
 	"github.com/gorilla/handlers"
 )
 
-func serveFixture(ctx context.Context, factory messaging.SessionFactory) {
+func serveFixture(ctx context.Context, factory ContainerFactory) {
 	var statusMu sync.Mutex
 	status := "pending records"
 
@@ -88,8 +87,10 @@ func serveFixture(ctx context.Context, factory messaging.SessionFactory) {
 				defer manageCancel()
 				managers = managers[0:0]
 				for src, stor := range config {
+					container := factory()
+					container.Start(ctx)
 					isController := src.Type == "CONTROLLER"
-					managers = append(managers, eventsource.NewManager(factory, eventsource.ManagerConfig{
+					managers = append(managers, eventsource.NewManager(container, eventsource.ManagerConfig{
 						Source: eventsource.Info{
 							ID:      src.Name,
 							Version: 1,
