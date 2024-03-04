@@ -22,3 +22,20 @@ jobs:
       with:
         version: "2023.1.7"
         install-go: false
+  integration:
+    runs-on: ubuntu-latest
+    env:
+      QDR_ENDPOINT: amqp://127.0.0.1:5672
+    services:
+      qdr:
+        image: quay.io/ckruse/vanflow-qdr:latest
+        ports:
+          - 5672:5672
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+    - name: Test
+      run: go test -v ./...
