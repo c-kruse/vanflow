@@ -18,7 +18,7 @@ const (
 	sourceSuffixHeartbeats = ".heartbeats"
 )
 
-// Client is responsible for interracting with Event Sources
+// Client is responsible for interacting with Event Sources
 //
 // Allows the caller to register message handler callbacks to react to received
 // messages and to control exactly what sources the client listens to.
@@ -30,16 +30,78 @@ type Client struct {
 	cleanup           []func()
 	heartbeatHandlers []HeartbeatMessageHandler
 	recordHandlers    []RecordMessageHandler
+	updateHandlers    chan struct{}
+	handlerWorkers    int
 
-	wg sync.WaitGroup
+	wg         sync.WaitGroup
+	records    chan vanflow.RecordMessage
+	heartbeats chan vanflow.HeartbeatMessage
 }
 
-func NewClient(factory messaging.SessionFactory, info Info) *Client {
+type ClientConfig struct {
+	// Source of vanflow events
+	Source Info
+}
+
+func NewClient(factory messaging.SessionFactory, cfg ClientConfig) *Client {
 	c := &Client{
-		factory:     factory,
-		eventSource: info,
+		factory:        factory,
+		eventSource:    cfg.Source,
+		updateHandlers: make(chan struct{}, 1),
+		records:        make(chan vanflow.RecordMessage),
+		heartbeats:     make(chan vanflow.HeartbeatMessage),
+		handlerWorkers: 1,
 	}
+	c.start()
 	return c
+}
+
+func (c *Client) start() {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	done := make(chan struct{})
+	c.cleanup = append(c.cleanup, func() { close(done) })
+
+	for i := 0; i < c.handlerWorkers; i++ {
+		c.wg.Add(1)
+		go c.handleMessages(done)
+	}
+}
+
+func (c *Client) handleMessages(done chan struct{}) {
+	defer c.wg.Done()
+	var ( // local copies of record message handlers
+		recordHandlers     []RecordMessageHandler
+		heartbeatHandlers  []HeartbeatMessageHandler
+		invalidateHandlers chan struct{} // trigger to reload handlers
+	)
+	reloadHandlers := func() {
+		c.lock.Lock()
+		defer c.lock.Unlock()
+		recordHandlers = make([]RecordMessageHandler, len(c.recordHandlers))
+		heartbeatHandlers = make([]HeartbeatMessageHandler, len(c.heartbeatHandlers))
+		copy(recordHandlers, c.recordHandlers)
+		copy(heartbeatHandlers, c.heartbeatHandlers)
+		invalidateHandlers = c.updateHandlers
+	}
+	reloadHandlers()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-invalidateHandlers:
+			reloadHandlers()
+		case message := <-c.records:
+			for _, handler := range c.recordHandlers {
+				handler(message)
+			}
+		case message := <-c.heartbeats:
+			for _, handler := range c.heartbeatHandlers {
+				handler(message)
+			}
+		}
+	}
 }
 
 type HeartbeatMessageHandler func(vanflow.HeartbeatMessage)
@@ -50,6 +112,7 @@ func (c *Client) OnHeartbeat(handler HeartbeatMessageHandler) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	c.heartbeatHandlers = append(c.heartbeatHandlers, handler)
+	c.signalHandlerReload()
 }
 
 // OnRecord registers a callback handler for RecordMessages.
@@ -57,27 +120,29 @@ func (c *Client) OnRecord(handler RecordMessageHandler) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	c.recordHandlers = append(c.recordHandlers, handler)
+	c.signalHandlerReload()
+}
+
+func (c *Client) signalHandlerReload() {
+	close(c.updateHandlers)
+	c.updateHandlers = make(chan struct{})
 }
 
 // Listen instructs the Client to listen to an event source using the specified
-// listener attributes until the context is cancelled or client.Close() is
+// listener configuration until the context is cancelled or client.Close() is
 // called.
-func (c *Client) Listen(ctx context.Context, attributes ListenerAttributeFactory) error {
+func (c *Client) Listen(ctx context.Context, attributes ListenerConfigProvider) error {
 	c.wg.Add(1)
 	listenerCtx, listenerCancel := context.WithCancel(ctx)
 
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	c.cleanup = append(c.cleanup, listenerCancel)
-	var recordHandlers []RecordMessageHandler
-	var heartbeatHandlers []HeartbeatMessageHandler
-	recordHandlers = append(recordHandlers, c.recordHandlers...)
-	heartbeatHandlers = append(heartbeatHandlers, c.heartbeatHandlers...)
 
 	go func(ctx context.Context) {
 		defer c.wg.Done()
-		address, credits := attributes.Get(c.eventSource)
-		msgs := listen(ctx, c.factory, address, credits)
+		cfg := attributes.Get(c.eventSource)
+		msgs := listen(ctx, c.factory, cfg.Address, uint32(cfg.Credit))
 		for {
 			select {
 			case <-ctx.Done():
@@ -88,18 +153,14 @@ func (c *Client) Listen(ctx context.Context, attributes ListenerAttributeFactory
 				}
 				decoded, err := vanflow.Decode(amqpMsg)
 				if err != nil {
-					slog.Error("could not decode message. skipping", slog.Any("error", err))
+					slog.Error("skipping message that could not be decoded", slog.Any("error", err))
 					continue
 				}
 				switch message := decoded.(type) {
 				case vanflow.RecordMessage:
-					for _, handler := range recordHandlers {
-						handler(message)
-					}
+					c.records <- message
 				case vanflow.HeartbeatMessage:
-					for _, handler := range heartbeatHandlers {
-						handler(message)
-					}
+					c.heartbeats <- message
 				}
 			}
 		}
@@ -138,34 +199,39 @@ func (c *Client) SendFlush(ctx context.Context) error {
 	return nil
 }
 
-type ListenerAttributeFactory interface {
-	Get(Info) (address string, credit uint32)
+type ListenerConfig struct {
+	Address string
+	Credit  int
+}
+
+type ListenerConfigProvider interface {
+	Get(Info) ListenerConfig
 }
 
 type addresser func(i Info) string
 
-func (fn addresser) Get(info Info) (string, uint32) {
-	return fn(info), 250
+func (fn addresser) Get(info Info) ListenerConfig {
+	return ListenerConfig{Address: fn(info), Credit: 256}
 }
 
-func FromSourceAddress() ListenerAttributeFactory {
+func FromSourceAddress() ListenerConfigProvider {
 	return addresser(func(i Info) string { return i.Address })
 }
 
-func FromSourceAddressLogs() ListenerAttributeFactory {
+func FromSourceAddressLogs() ListenerConfigProvider {
 	return addresser(func(i Info) string { return i.Address + sourceSuffixLogs })
 }
 
-func FromSourceAddressFlows() ListenerAttributeFactory {
+func FromSourceAddressFlows() ListenerConfigProvider {
 	return addresser(func(i Info) string { return i.Address + sourceSuffixFlows })
 }
 
-func FromSourceAddressHeartbeats() ListenerAttributeFactory {
+func FromSourceAddressHeartbeats() ListenerConfigProvider {
 	return addresser(func(i Info) string { return i.Address + sourceSuffixHeartbeats })
 }
 
 func listen(ctx context.Context, factory messaging.SessionFactory, address string, credits uint32) <-chan *amqp.Message {
-	msgs := make(chan *amqp.Message, 32)
+	msgs := make(chan *amqp.Message)
 	go func() {
 		defer close(msgs)
 		b := backoffRetryForever(ctx)

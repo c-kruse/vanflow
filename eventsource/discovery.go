@@ -121,6 +121,11 @@ type WatchConfig struct {
 	// GracePeriod is the time to wait for client activity before enforcing
 	// the Timeout.
 	GracePeriod time.Duration
+
+	// DiscoveryUpdateInterval is the period at which discovery gets updated
+	// with the latest LastSeen timestamp from the watcher. Defaults to once
+	// per second.
+	DiscoveryUpdateInterval time.Duration
 }
 
 // NewWatchClient creates a client for a given event source and uses that client
@@ -131,7 +136,7 @@ func (d *Discovery) NewWatchClient(ctx context.Context, cfg WatchConfig) (*Clien
 		return nil, fmt.Errorf("unknown event source %s", cfg.ID)
 	}
 
-	c := NewClient(d.factory, info)
+	c := NewClient(d.factory, ClientConfig{Source: info})
 	w := newWatch(d, c)
 	go w.run(ctx, cfg)
 	return c, nil
@@ -174,7 +179,11 @@ func (w *watch) run(ctx context.Context, cfg WatchConfig) {
 
 	// only update discovery data once per second to keep
 	// lock contention reasonable.
-	advanceTicker := time.NewTicker(time.Second)
+	advanceInterval := cfg.DiscoveryUpdateInterval
+	if advanceInterval <= 0 {
+		advanceInterval = time.Second
+	}
+	advanceTicker := time.NewTicker(advanceInterval)
 	defer advanceTicker.Stop()
 	defer w.client.Close()
 
