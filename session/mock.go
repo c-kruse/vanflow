@@ -8,6 +8,7 @@ import (
 	"github.com/Azure/go-amqp"
 )
 
+// NewMockContainer creates a mock container using the mock router
 func NewMockContainer(router *MockRouter) Container {
 	return &mockContainer{
 		Router: router,
@@ -42,6 +43,9 @@ func (c *mockContainer) NewSender(address string, opts SenderOptions) Sender {
 	}
 }
 
+// NewMockRouter returns a mock router that can be used by containers to send
+// and receive multicast messages. Behaves like a very rough approximation of
+// the skupper router for routing vanflow messages.
 func NewMockRouter() *MockRouter {
 	return &MockRouter{
 		topics: make(map[string]*multicast),

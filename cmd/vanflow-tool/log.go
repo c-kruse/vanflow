@@ -11,10 +11,9 @@ import (
 
 	"github.com/c-kruse/vanflow"
 	"github.com/c-kruse/vanflow/eventsource"
-	"github.com/c-kruse/vanflow/messaging"
 )
 
-func logOnly(ctx context.Context, factory messaging.SessionFactory) {
+func logOnly(ctx context.Context, factory ContainerFactory) {
 	outputstream := make(chan Message, 64)
 
 	heartbeatHandler := func(m vanflow.HeartbeatMessage) {
@@ -39,11 +38,15 @@ func logOnly(ctx context.Context, factory messaging.SessionFactory) {
 
 	slog.Debug("Starting to discover event sources")
 
-	discovery := eventsource.NewDiscovery(factory)
+	container := factory()
+	container.Start(ctx)
+
+	discovery := eventsource.NewDiscovery(container, eventsource.DiscoveryOptions{})
 	go discovery.Run(ctx, eventsource.DiscoveryHandlers{
 		Discovered: func(source eventsource.Info) {
 			slog.Debug("source discovered", "source", source)
-			client, err := discovery.NewWatchClient(ctx, eventsource.WatchConfig{ID: source.ID, Timeout: time.Second * 30})
+			client := eventsource.NewClient(container, eventsource.ClientOptions{Source: source})
+			err := discovery.NewWatchClient(ctx, eventsource.WatchConfig{Client: client, ID: source.ID, Timeout: time.Second * 30})
 			if err != nil {
 				slog.Error("discovery error", "error", err)
 				return

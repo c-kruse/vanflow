@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/c-kruse/vanflow"
+	"github.com/c-kruse/vanflow/session"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"gotest.tools/assert"
 	"gotest.tools/poll"
 )
@@ -15,9 +17,12 @@ func TestDiscoveryBasic(t *testing.T) {
 	t.Parallel()
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
-	factory := NewMockConnectionFactory(t, "mockamqp://local")
+	ctr, tstCtr := requireContainers(t)
+	ctr.Start(tstCtx)
+	tstCtr.Start(tstCtx)
 
-	discovery := NewDiscovery(factory)
+	beaconAddress := mcsfe(uniqueSuffix("all"))
+	discovery := NewDiscovery(ctr, DiscoveryOptions{BeaconAddress: beaconAddress})
 
 	discoveredOut := make(chan Info, 8)
 	forgottenOut := make(chan Info, 8)
@@ -34,15 +39,19 @@ func TestDiscoveryBasic(t *testing.T) {
 		})
 	}()
 
-	tstConn, _ := factory.Create(tstCtx)
-	tstSender, _ := tstConn.Sender(tstCtx, "mc/sfe.all", nil)
-	factory.Broker.AwaitReceivers("mc/sfe.all", 1)
-	beaconA := fixtureBeaconFor("a", "ROUTER")
-	beaconB := fixtureBeaconFor("b", "CONTROLLER")
+	tstSender := tstCtr.NewSender(beaconAddress, session.SenderOptions{})
 
-	tstSender.Send(tstCtx, beaconA.Encode(), nil)
-	tstSender.Send(tstCtx, beaconB.Encode(), nil)
+	testSuffix := uniqueSuffix("")
+	sourceAID, sourceBID := "a"+testSuffix, "b"+testSuffix
+	beaconA := fixtureBeaconFor(sourceAID, "ROUTER")
+	beaconB := fixtureBeaconFor(sourceBID, "CONTROLLER")
 
+	tstSender.Send(tstCtx, beaconA.Encode())
+	tstSender.Send(tstCtx, beaconB.Encode())
+
+	// when listeners are not yet present the router can drop beacon messages
+	// retry sending initial beacons once
+	retryOnceAfter := time.Now().Add(500 * time.Millisecond)
 	// wait for discovery.List to return two sources
 	poll.WaitOn(t,
 		func(t poll.LogT) poll.Result {
@@ -50,40 +59,45 @@ func TestDiscoveryBasic(t *testing.T) {
 			if actual == desired {
 				return poll.Success()
 			}
+			if time.Now().After(retryOnceAfter) {
+				tstSender.Send(tstCtx, beaconA.Encode())
+				tstSender.Send(tstCtx, beaconB.Encode())
+				retryOnceAfter = retryOnceAfter.Add(time.Hour)
+			}
 			return poll.Continue("number of event sources is %d, not %d", actual, desired)
-		}, poll.WithTimeout(time.Second),
+		}, poll.WithTimeout(3*time.Second),
 	)
 
 	// expect two events
 	eventA := <-discoveredOut
 	eventB := <-discoveredOut
-	if eventA.ID == "b" {
+	if eventA.ID == sourceBID {
 		eventA, eventB = eventB, eventA
 	}
 
-	sourceA, ok := discovery.Get("a")
+	sourceA, ok := discovery.Get(sourceAID)
 	assert.Check(t, ok)
-	sourceB, ok := discovery.Get("b")
+	sourceB, ok := discovery.Get(sourceBID)
 	assert.Check(t, ok)
 
-	assert.DeepEqual(t, sourceA, eventA)
-	assert.DeepEqual(t, sourceB, eventB)
+	assert.DeepEqual(t, sourceA, eventA, cmpopts.IgnoreFields(Info{}, "LastSeen"))
+	assert.DeepEqual(t, sourceB, eventB, cmpopts.IgnoreFields(Info{}, "LastSeen"))
 
-	tstSender.Send(tstCtx, beaconA.Encode(), nil)
-	tstSender.Send(tstCtx, beaconA.Encode(), nil)
-	tstSender.Send(tstCtx, beaconA.Encode(), nil)
-	tstSender.Send(tstCtx, beaconA.Encode(), nil)
-	tstSender.Send(tstCtx, beaconB.Encode(), nil)
-	tstSender.Send(tstCtx, beaconA.Encode(), nil)
+	tstSender.Send(tstCtx, beaconA.Encode())
+	tstSender.Send(tstCtx, beaconA.Encode())
+	tstSender.Send(tstCtx, beaconA.Encode())
+	tstSender.Send(tstCtx, beaconA.Encode())
+	tstSender.Send(tstCtx, beaconB.Encode())
+	tstSender.Send(tstCtx, beaconA.Encode())
 
 	// wait for LastSeen to update
 	poll.WaitOn(t,
 		func(t poll.LogT) poll.Result {
-			presentA, ok := discovery.Get("a")
+			presentA, ok := discovery.Get(sourceAID)
 			if !ok {
 				return poll.Error(fmt.Errorf("error getting source 'a'"))
 			}
-			presentB, ok := discovery.Get("b")
+			presentB, ok := discovery.Get(sourceBID)
 			if !ok {
 				return poll.Error(fmt.Errorf("error getting source 'b'"))
 			}
@@ -93,7 +107,7 @@ func TestDiscoveryBasic(t *testing.T) {
 				return poll.Success()
 			}
 			return poll.Continue("waiting for lastseen to advance")
-		}, poll.WithTimeout(1*time.Second),
+		}, poll.WithTimeout(3*time.Second),
 	)
 	assert.Check(t, len(discoveredOut) == 0, "expected no new discovery events after subsequent beacons")
 	assert.Check(t, len(forgottenOut) == 0, "expected no new forgotten events after subsequent beacons")
@@ -101,7 +115,7 @@ func TestDiscoveryBasic(t *testing.T) {
 	assert.Check(t, !discovery.Forget("c"), "expected to ignore call to Forget for unknown id")
 	assert.Check(t, len(forgottenOut) == 0, "expected no new events after invalid call to Forget")
 
-	assert.Check(t, discovery.Forget("a"), "expected ok to forget event source 'a'")
+	assert.Check(t, discovery.Forget(sourceAID), "expected ok to forget event source 'a'")
 	// wait for discovery.List to return only one source
 	poll.WaitOn(t,
 		func(t poll.LogT) poll.Result {
@@ -115,9 +129,9 @@ func TestDiscoveryBasic(t *testing.T) {
 
 	// expect one event
 	eventDelete := <-forgottenOut
-	assert.Check(t, eventDelete.ID == "a")
-	assert.Check(t, len(discovery.List()) == 1)
-	_, ok = discovery.Get("a")
+	assert.Check(t, eventDelete.ID == sourceAID)
+	assert.Equal(t, len(discovery.List()), 1)
+	_, ok = discovery.Get(sourceAID)
 	assert.Check(t, !ok, "expected Get on forgotten ID to return not ok")
 
 	tstCancel()
@@ -132,9 +146,12 @@ func TestDiscoveryWatch(t *testing.T) {
 	t.Parallel()
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
-	factory := NewMockConnectionFactory(t, "mockamqp://local")
+	ctr, tstCtr := requireContainers(t)
+	ctr.Start(tstCtx)
+	tstCtr.Start(tstCtx)
 
-	discovery := NewDiscovery(factory)
+	beaconAddress := mcsfe(uniqueSuffix("all"))
+	discovery := NewDiscovery(ctr, DiscoveryOptions{BeaconAddress: beaconAddress})
 
 	discoveredOut := make(chan Info, 8)
 	forgottenOut := make(chan Info, 8)
@@ -151,33 +168,43 @@ func TestDiscoveryWatch(t *testing.T) {
 		})
 	}()
 
-	tstConn, _ := factory.Create(tstCtx)
-	beaconSender, _ := tstConn.Sender(tstCtx, "mc/sfe.all", nil)
-	heartbeatSender, _ := tstConn.Sender(tstCtx, "mc/sfe.a", nil)
+	sourceAID := uniqueSuffix("a")
+
+	beaconSender := tstCtr.NewSender(beaconAddress, session.SenderOptions{})
+	heartbeatSender := tstCtr.NewSender(mcsfe(sourceAID), session.SenderOptions{})
 	// continually send heartbeats for source a
 	go func() {
 		heartbeat := vanflow.HeartbeatMessage{
 			Version:      1,
 			Now:          1000,
-			Identity:     "a",
-			MessageProps: vanflow.MessageProps{To: "mc/sfe.a"},
+			Identity:     sourceAID,
+			MessageProps: vanflow.MessageProps{To: mcsfe(sourceAID)},
 		}
 		for {
 			time.Sleep(time.Millisecond * 25)
-			heartbeatSender.Send(tstCtx, heartbeat.Encode(), nil)
+			heartbeatSender.Send(tstCtx, heartbeat.Encode())
 			heartbeat.Now++
 		}
 	}()
 
 	// send a beacon for router a and await the discovery event
-	factory.Broker.AwaitReceivers("mc/sfe.all", 1)
-	beaconA := fixtureBeaconFor("a", "ROUTER")
+	beaconA := fixtureBeaconFor(sourceAID, "ROUTER")
 
-	beaconSender.Send(tstCtx, beaconA.Encode(), nil)
-	event := <-discoveredOut
+	assert.Check(t, beaconSender.Send(tstCtx, beaconA.Encode()))
+	var event Info
+	select {
+	case out := <-discoveredOut:
+		event = out
+	case <-time.After(250 * time.Millisecond):
+		t.Log("retrying beacon") //
+		assert.Check(t, beaconSender.Send(tstCtx, beaconA.Encode()))
+		event = <-discoveredOut
+	}
 
+	client := NewClient(ctr, ClientOptions{Source: event})
 	// start a new watched client and begin listening
-	client, err := discovery.NewWatchClient(tstCtx, WatchConfig{
+	err := discovery.NewWatchClient(tstCtx, WatchConfig{
+		Client:                  client,
 		ID:                      event.ID,
 		Timeout:                 time.Millisecond * 250,
 		GracePeriod:             time.Second,
@@ -190,7 +217,7 @@ func TestDiscoveryWatch(t *testing.T) {
 
 	poll.WaitOn(t,
 		func(t poll.LogT) poll.Result {
-			present, ok := discovery.Get("a")
+			present, ok := discovery.Get(sourceAID)
 			if !ok {
 				return poll.Error(fmt.Errorf("event source 'a' forgotten"))
 			}
@@ -206,7 +233,7 @@ func TestDiscoveryWatch(t *testing.T) {
 
 	select {
 	case event := <-forgottenOut:
-		assert.Check(t, event.ID == "a")
+		assert.Check(t, event.ID == sourceAID)
 	case <-time.After(time.Second):
 		t.Error("expected source to be forgotten after starting watch client with no activity")
 	}

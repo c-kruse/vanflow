@@ -12,7 +12,7 @@ import (
 	"os/signal"
 
 	"github.com/Azure/go-amqp"
-	"github.com/c-kruse/vanflow/messaging"
+	"github.com/c-kruse/vanflow/session"
 )
 
 var (
@@ -119,11 +119,13 @@ func main() {
 		connOpts.TLSConfig = tlsCfg
 		connOpts.SASLType = amqp.SASLTypeExternal("")
 	}
-	factory := messaging.NewSessionFactory(connURL, messaging.Config{
-		Conn: connOpts,
-	})
+	factory := func() session.Container {
+		return session.NewContainer(connURL, session.ContainerConfig{
+			Conn: connOpts,
+		})
+	}
 
-	var cmdHandler func(context.Context, messaging.SessionFactory)
+	var cmdHandler func(context.Context, ContainerFactory)
 	switch name := flags.Arg(0); name {
 	case "log":
 		cmdHandler = logOnly
@@ -142,6 +144,8 @@ func main() {
 	defer cancel()
 	cmdHandler(ctx, factory)
 }
+
+type ContainerFactory func() session.Container
 
 type tlsConfig struct {
 	CA     string `json:"ca,omitempty"`

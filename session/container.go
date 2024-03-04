@@ -25,20 +25,19 @@ func (o ReceiverOptions) get() amqp.ReceiverOptions {
 }
 
 type SenderOptions struct {
-	SendPresettled bool
 }
 
 func (o SenderOptions) get() amqp.SenderOptions {
 	var result amqp.SenderOptions
-	if o.SendPresettled {
-		result.SettlementMode = amqp.SenderSettleModeSettled.Ptr()
-	}
 	return result
 }
 
 type Container interface {
+	// Start the container
 	Start(context.Context)
+	// NewReceiver adds a new reciver link using the container's session
 	NewReceiver(address string, opts ReceiverOptions) Receiver
+	// NewSender adds a new sender link using the container's session
 	NewSender(address string, opts SenderOptions) Sender
 }
 
@@ -61,6 +60,11 @@ type ContainerConfig struct {
 	BackOff backoff.BackOff
 }
 
+// NewContainer creats an amqp container that will attempt to create a single
+// connection + session pair using the supplied amqp connection options for use
+// with the container's Senders and Receivers. Will recreate the connection and
+// session when a link encounters an error using the specified backoff
+// strategy.
 func NewContainer(address string, config ContainerConfig) Container {
 	c := &container{
 		address:       address,
@@ -144,6 +148,7 @@ func (c *container) Start(ctx context.Context) {
 				prevSessionTeardown()
 				prevSessionTeardown = func() {
 					sess.Close(ctx)
+					conn.Close()
 				}
 
 				for {
@@ -166,6 +171,7 @@ func (c *container) Start(ctx context.Context) {
 				slog.Error("session error triggered restart", slog.String("delay", d.String()), slog.Any("error", err))
 			},
 		)
+		defer prevSessionTeardown()
 		if err != nil {
 			if errors.Is(err, ctx.Err()) {
 				return
@@ -380,7 +386,7 @@ func (r *link) Close(ctx context.Context) error {
 	defer r.mu.Unlock()
 	r.closed = true
 	rcv := r.rcv
-	r.curr, r.rcv = nil, nil
+	r.curr, r.rcv, r.snd = nil, nil, nil
 	if rcv != nil {
 		return rcv.Close(ctx)
 	}

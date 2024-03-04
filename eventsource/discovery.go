@@ -9,18 +9,19 @@ import (
 	"time"
 
 	"github.com/c-kruse/vanflow"
-	"github.com/c-kruse/vanflow/messaging"
+	"github.com/c-kruse/vanflow/session"
 )
 
 const beaconAddress = "mc/sfe.all"
 
 // Discovery manages a collection of known event sources
 type Discovery struct {
-	factory    messaging.SessionFactory
-	lock       sync.Mutex
-	state      map[string]Info
-	discovered chan Info
-	forgotten  chan Info
+	container     session.Container
+	lock          sync.Mutex
+	state         map[string]Info
+	discovered    chan Info
+	forgotten     chan Info
+	beaconAddress string
 }
 
 type DiscoveryHandlers struct {
@@ -28,35 +29,51 @@ type DiscoveryHandlers struct {
 	Forgotten  func(source Info)
 }
 
-func NewDiscovery(factory messaging.SessionFactory) *Discovery {
+type DiscoveryOptions struct {
+	BeaconAddress string
+}
+
+func NewDiscovery(container session.Container, opts DiscoveryOptions) *Discovery {
+	if opts.BeaconAddress == "" {
+		opts.BeaconAddress = beaconAddress
+	}
 	return &Discovery{
-		factory:    factory,
-		state:      make(map[string]Info),
-		discovered: make(chan Info, 32),
-		forgotten:  make(chan Info, 32),
+		container:     container,
+		state:         make(map[string]Info),
+		discovered:    make(chan Info, 32),
+		forgotten:     make(chan Info, 32),
+		beaconAddress: opts.BeaconAddress,
 	}
 }
 
 // Run event source discovery until the context is cancelled
 func (d *Discovery) Run(ctx context.Context, handlers DiscoveryHandlers) error {
-	beaconMsgs := listen(ctx, d.factory, beaconAddress, 256)
+	receiver := d.container.NewReceiver(d.beaconAddress, session.ReceiverOptions{})
+	defer receiver.Close(ctx)
+	dCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go d.handleDiscovery(dCtx, handlers)
+	for {
+		msg, err := receiver.Next(ctx)
+		if err != nil {
+			return fmt.Errorf("discovery error receiving beacon messages: %w", err)
+		}
+		if err := receiver.Accept(ctx, msg); err != nil {
+			slog.Error("discovery got error accepting message", slog.Any("error", err))
+		}
+		if *msg.Properties.Subject != "BEACON" {
+			slog.Info("received non-beacon from beacon source", slog.Any("subject", msg.Properties.Subject), slog.Any("source", msg.Properties.To))
+			continue
+		}
+		d.observe(vanflow.DecodeBeacon(msg))
+	}
+}
+
+func (d *Discovery) handleDiscovery(ctx context.Context, handlers DiscoveryHandlers) {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case msg, ok := <-beaconMsgs:
-			if !ok {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return ctxErr
-				}
-				slog.Info("restarting beacon listener")
-				beaconMsgs = listen(ctx, d.factory, beaconAddress, 256)
-			}
-			if *msg.Properties.Subject != "BEACON" {
-				slog.Info("received non-beacon from beacon source", slog.Any("subject", msg.Properties.Subject), slog.Any("source", msg.Properties.To))
-				continue
-			}
-			d.observe(vanflow.DecodeBeacon(msg))
+			return
 		case info := <-d.discovered:
 			if handlers.Discovered != nil {
 				handlers.Discovered(info)
@@ -111,6 +128,8 @@ func (d *Discovery) List() []Info {
 }
 
 type WatchConfig struct {
+	// Client to watch
+	Client *Client
 	// ID of the event source to watch
 	ID string
 	// Timeout for client activity. When set, timeout is the duration that
@@ -130,16 +149,15 @@ type WatchConfig struct {
 
 // NewWatchClient creates a client for a given event source and uses that client
 // to keep the source LastHeard time up to date.
-func (d *Discovery) NewWatchClient(ctx context.Context, cfg WatchConfig) (*Client, error) {
-	info, ok := d.Get(cfg.ID)
+func (d *Discovery) NewWatchClient(ctx context.Context, cfg WatchConfig) error {
+	_, ok := d.Get(cfg.ID)
 	if !ok {
-		return nil, fmt.Errorf("unknown event source %s", cfg.ID)
+		return fmt.Errorf("unknown event source %s", cfg.ID)
 	}
 
-	c := NewClient(d.factory, ClientConfig{Source: info})
-	w := newWatch(d, c)
+	w := newWatch(d, cfg.Client)
 	go w.run(ctx, cfg)
-	return c, nil
+	return nil
 }
 
 type watch struct {

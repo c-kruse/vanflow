@@ -9,9 +9,8 @@ import (
 	amqp "github.com/Azure/go-amqp"
 	"github.com/c-kruse/vanflow"
 	"github.com/c-kruse/vanflow/encoding"
-	"github.com/c-kruse/vanflow/messaging"
+	"github.com/c-kruse/vanflow/session"
 	"github.com/c-kruse/vanflow/store"
-	"github.com/cenkalti/backoff/v4"
 )
 
 type ManagerConfig struct {
@@ -50,16 +49,16 @@ type RecordUpdate struct {
 
 type Manager struct {
 	ManagerConfig
-	factory messaging.SessionFactory
+	container session.Container
 
 	flushQueue  chan struct{}
 	changeQueue chan RecordUpdate
 	sendQueue   chan vanflow.RecordMessage
 }
 
-func NewManager(factory messaging.SessionFactory, cfg ManagerConfig) *Manager {
+func NewManager(container session.Container, cfg ManagerConfig) *Manager {
 	return &Manager{
-		factory:       factory,
+		container:     container,
 		ManagerConfig: cfg,
 		flushQueue:    make(chan struct{}, 8),
 		changeQueue:   make(chan RecordUpdate, 256),
@@ -79,38 +78,24 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) sendRecords(ctx context.Context) {
-	b := backoffRetryForever(ctx)
-	backoff.Retry(func() error {
-		conn, err := m.factory.Create(ctx)
-		if err != nil {
-			slog.Error("could not establish connection for event source records", slog.Any("error", err))
-			return err
-		}
-		sender, err := conn.Sender(ctx, m.Source.Address, nil)
-		if err != nil {
-			slog.Error("could not open sender for event source records", slog.Any("error", err))
-			return err
-		}
-		defer sender.Close(ctx)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case record := <-m.sendQueue:
-				msg, err := record.Encode()
-				if err != nil {
-					slog.Error("skipping record message after encoding error:", slog.Any("error", err))
-					continue
-				}
-				if err := sender.Send(ctx, msg, nil); err != nil {
-					slog.Error("error sending event source record", slog.Any("error", err))
-					return err
-				}
-				b.Reset() // message sent so connection is happy
+	sender := m.container.NewSender(m.Source.Address, session.SenderOptions{})
+	defer sender.Close(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case record := <-m.sendQueue:
+			msg, err := record.Encode()
+			if err != nil {
+				slog.Error("skipping record message after encoding error:", slog.Any("error", err))
+				continue
+			}
+			if err := sender.Send(ctx, msg); err != nil {
+				slog.Error("error sending event source record", slog.Any("error", err))
+				return
 			}
 		}
-	}, b)
+	}
 }
 
 func diffRecord(d RecordUpdate) (vanflow.Record, bool) {
@@ -267,97 +252,85 @@ func (m *Manager) sendKeepalives(ctx context.Context) {
 	if m.UseAlternateHeartbeatAddress {
 		heartbeatAddr = heartbeatAddr + sourceSuffixHeartbeats
 	}
-	sendSettled := &amqp.SenderOptions{SettlementMode: amqp.SenderSettleModeSettled.Ptr()}
-	b := backoffRetryForever(ctx)
-	backoff.Retry(func() error {
-		conn, err := m.factory.Create(ctx)
-		if err != nil {
-			slog.Error("could not establish connection for event source keepalive", slog.Any("error", err))
-			return err
-		}
-		beaconSender, err := conn.Sender(ctx, beaconAddress, sendSettled)
-		if err != nil {
-			slog.Error("could not open sender for event source beacon", slog.Any("error", err))
-			return err
-		}
-		defer beaconSender.Close(ctx)
-		heartbeatSender, err := conn.Sender(ctx, heartbeatAddr, sendSettled)
-		if err != nil {
-			slog.Error("could not open sender for event source heartbeat", slog.Any("error", err))
-			return err
-		}
-		defer heartbeatSender.Close(ctx)
 
-		// start with sending beacon
+	beaconSender := m.container.NewSender(beaconAddress, session.SenderOptions{})
+	defer beaconSender.Close(ctx)
+	heartbeatSender := m.container.NewSender(heartbeatAddr, session.SenderOptions{})
+	defer heartbeatSender.Close(ctx)
+
+	// start with sending beacon
+	for {
 		if err := sendWithTimeout(ctx, beaconInterval, beaconSender, beaconMessage.Encode()); err != nil {
 			slog.Error("error sending initial beacon message", slog.Any("error", err))
-			return err
+			continue
 		}
+		break
+	}
 
-		messageDeliveryTimeout := heartbeatInterval
-		if messageDeliveryTimeout > beaconInterval {
-			messageDeliveryTimeout = beaconInterval
-		}
+	messageDeliveryTimeout := heartbeatInterval
+	if messageDeliveryTimeout > beaconInterval {
+		messageDeliveryTimeout = beaconInterval
+	}
 
-		beaconTimer := time.NewTicker(beaconInterval)
-		heartbeatTimer := time.NewTicker(heartbeatInterval)
-		heartbeatTimeouts := 0
-		firstHeartbeatSent := false
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-beaconTimer.C:
-				msg := beaconMessage.Encode()
-				if err := sendWithTimeout(ctx, messageDeliveryTimeout, beaconSender, msg); err != nil {
-					slog.Error("error sending event source beacon", slog.Any("error", err))
-					return err
-				}
-				b.Reset()
-			case <-heartbeatTimer.C:
-				heartbeatMessage.Now = uint64(time.Now().UnixMicro())
-				msg := heartbeatMessage.Encode()
-				// skupper router will block messages sent multicast without a
-				// listener by default. The router needs to register a beacon
-				// before heartbeats are unblocked. This doesn't seem entirely
-				// reliable so I've opted to ignore the first few heartbeat
-				// timeouts before aborting the connection entirely.
-				if err := sendWithTimeout(ctx, messageDeliveryTimeout, heartbeatSender, msg); err != nil {
-					if errors.Is(err, errSendTimeoutExceeded) && heartbeatTimeouts < 3 && !firstHeartbeatSent {
-						heartbeatTimeouts++
-						slog.Info("heartbeat message send timed out")
-						continue
-					}
-					slog.Error("error sending event source heartbeat", slog.Any("error", err))
-					return err
-				}
-				firstHeartbeatSent = true
-			}
-		}
-	}, b)
-}
-
-func (m *Manager) listenFlushes(ctx context.Context) {
-	flushMessages := listen(ctx, m.factory, m.Source.Direct, 256)
+	beaconTimer := time.NewTicker(beaconInterval)
+	heartbeatTimer := time.NewTicker(heartbeatInterval)
+	heartbeatTimeouts := 0
+	firstHeartbeatSent := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-flushMessages:
-			select {
-			case m.flushQueue <- struct{}{}:
-			default: // drop flush if queue is full
+		case <-beaconTimer.C:
+			msg := beaconMessage.Encode()
+			if err := sendWithTimeout(ctx, messageDeliveryTimeout, beaconSender, msg); err != nil {
+				slog.Error("error sending event source beacon", slog.Any("error", err))
 			}
+		case <-heartbeatTimer.C:
+			heartbeatMessage.Now = uint64(time.Now().UnixMicro())
+			msg := heartbeatMessage.Encode()
+			// skupper router will block messages sent multicast without a
+			// listener by default. The router needs to register a beacon
+			// before heartbeats are unblocked. This doesn't seem entirely
+			// reliable so I've opted to ignore the first few heartbeat
+			// timeouts before aborting the connection entirely.
+			if err := sendWithTimeout(ctx, messageDeliveryTimeout, heartbeatSender, msg); err != nil {
+				if errors.Is(err, errSendTimeoutExceeded) && heartbeatTimeouts < 3 && !firstHeartbeatSent {
+					heartbeatTimeouts++
+					slog.Info("heartbeat message send timed out")
+					continue
+				}
+				slog.Error("error sending event source heartbeat", slog.Any("error", err))
+			}
+			firstHeartbeatSent = true
+		}
+	}
+}
+
+func (m *Manager) listenFlushes(ctx context.Context) {
+	flushReceiver := m.container.NewReceiver(m.Source.Direct, session.ReceiverOptions{Credit: 256})
+	defer flushReceiver.Close(ctx)
+	for {
+		msg, err := flushReceiver.Next(ctx)
+		if err != nil {
+			if errors.Is(err, ctx.Err()) {
+				return
+			}
+			slog.Error("flush receive error", slog.Any("error", err))
+		}
+		flushReceiver.Accept(ctx, msg)
+		select {
+		case m.flushQueue <- struct{}{}:
+		default: // drop flush if queue is full
 		}
 	}
 }
 
 var errSendTimeoutExceeded = errors.New("send timed out")
 
-func sendWithTimeout(ctx context.Context, timeout time.Duration, sender messaging.Sender, msg *amqp.Message) error {
+func sendWithTimeout(ctx context.Context, timeout time.Duration, sender session.Sender, msg *amqp.Message) error {
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	err := sender.Send(ctx, msg, nil)
+	err := sender.Send(ctx, msg)
 	if err != nil {
 		if errors.Is(err, requestCtx.Err()) && ctx.Err() == nil {
 			return errSendTimeoutExceeded
@@ -383,13 +356,4 @@ func nextN[T any](ctx context.Context, c <-chan T, n int) []T {
 			}
 		}
 	}
-}
-
-func backoffRetryForever(ctx context.Context) backoff.BackOffContext {
-	exp := backoff.NewExponentialBackOff()
-	exp.InitialInterval = 100 * time.Millisecond
-	exp.MaxInterval = 30 * time.Second
-	exp.MaxElapsedTime = 0
-	exp.Reset()
-	return backoff.WithContext(exp, ctx)
 }
