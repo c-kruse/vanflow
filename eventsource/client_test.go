@@ -23,7 +23,7 @@ func TestClient(t *testing.T) {
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
 	factory := requireContainers(t)
-	ctr, tstCtr := factory.Create("client"), factory.Create("test")
+	ctr, tstCtr := factory.Create(), factory.Create()
 	ctr.Start(tstCtx)
 	tstCtr.Start(tstCtx)
 
@@ -100,7 +100,7 @@ func TestClient(t *testing.T) {
 
 func TestClientFlush(t *testing.T) {
 	factory := requireContainers(t)
-	ctr, tstCtr := factory.Create("client"), factory.Create("test")
+	ctr, tstCtr := factory.Create(), factory.Create()
 	ctr.Start(context.Background())
 	tstCtr.Start(context.Background())
 
@@ -250,7 +250,10 @@ func requireContainers(t *testing.T) session.ContainerFactory {
 		ping.Close(setupCtx)
 		pong.Close(setupCtx)
 
-		factory = session.NewContainerFactory(qdr, session.ContainerConfig{})
+		factory = session.NewContainerFactory(qdr,
+			session.ContainerConfig{
+				Conn: &amqp.ConnOptions{ContainerID: uniqueSuffix("eventsourcetest")},
+			})
 		return nil
 	}()
 	if err != nil {

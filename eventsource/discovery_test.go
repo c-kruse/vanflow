@@ -18,7 +18,7 @@ func TestDiscoveryBasic(t *testing.T) {
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
 	factory := requireContainers(t)
-	ctr, tstCtr := factory.Create("client"), factory.Create("test")
+	ctr, tstCtr := factory.Create(), factory.Create()
 	ctr.Start(tstCtx)
 	tstCtr.Start(tstCtx)
 
@@ -148,7 +148,7 @@ func TestDiscoveryWatch(t *testing.T) {
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
 	factory := requireContainers(t)
-	ctr, tstCtr := factory.Create("client"), factory.Create("test")
+	ctr, tstCtr := factory.Create(), factory.Create()
 	ctr.Start(tstCtx)
 	tstCtr.Start(tstCtx)
 

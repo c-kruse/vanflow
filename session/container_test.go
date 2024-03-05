@@ -1,8 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -31,10 +35,10 @@ func TestContainerPing(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.Name, func(t *testing.T) {
 			factory := tc.Factory(t)
-			cs := factory.Create("sender")
-			cr := factory.Create("receiver")
+			cs := factory.Create()
+			cr := factory.Create()
 
-			channel := randomSuffix("ex")
+			channel := "ex/" + randomID()
 			ctx := context.Background()
 			cs.Start(ctx)
 			cr.Start(ctx)
@@ -99,7 +103,9 @@ func containersFromEnv(t *testing.T) ContainerFactory {
 			return fmt.Errorf("could not establish connection to router: %v", err)
 		}
 		conn.Close()
-		factory = NewContainerFactory(qdr, ContainerConfig{})
+		factory = NewContainerFactory(qdr, ContainerConfig{
+			Conn: &amqp.ConnOptions{ContainerID: "tc/" + randomID()},
+		})
 		return nil
 	}()
 	if err != nil {
@@ -107,4 +113,13 @@ func containersFromEnv(t *testing.T) ContainerFactory {
 	}
 
 	return factory
+}
+
+func randomSuffix(prefix string) string {
+	var salt [8]byte
+	io.ReadFull(rand.Reader, salt[:])
+	out := bytes.NewBuffer([]byte(prefix))
+	out.WriteByte('-')
+	hex.NewEncoder(out).Write(salt[:])
+	return out.String()
 }

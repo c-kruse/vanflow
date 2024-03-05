@@ -88,7 +88,7 @@ func serveFixture(ctx context.Context, factory session.ContainerFactory) {
 				defer manageCancel()
 				managers = managers[0:0]
 				for src, stor := range config {
-					container := factory.Create(src.Name)
+					container := factory.Create()
 					container.Start(ctx)
 					isController := src.Type == "CONTROLLER"
 					managers = append(managers, eventsource.NewManager(container, eventsource.ManagerConfig{
