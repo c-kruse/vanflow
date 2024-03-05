@@ -13,6 +13,7 @@ import (
 
 	"github.com/c-kruse/vanflow"
 	"github.com/c-kruse/vanflow/eventsource"
+	"github.com/c-kruse/vanflow/session"
 	"github.com/c-kruse/vanflow/store"
 	"github.com/gorilla/handlers"
 )
@@ -35,7 +36,7 @@ func getRecordTypes() []vanflow.Record {
 	return recordTypes
 }
 
-func serveRecords(ctx context.Context, factory ContainerFactory) {
+func serveRecords(ctx context.Context, factory session.ContainerFactory) {
 	slog.Debug("Starting to discover event sources")
 
 	recordTypes := getRecordTypes()
@@ -105,13 +106,15 @@ func serveRecords(ctx context.Context, factory ContainerFactory) {
 		})
 	}
 
-	container := factory()
+	container := factory.Create("discovery")
 	container.Start(ctx)
 	discovery := eventsource.NewDiscovery(container, eventsource.DiscoveryOptions{})
 	go discovery.Run(ctx, eventsource.DiscoveryHandlers{
 		Discovered: func(source eventsource.Info) {
 			slog.Debug("source discovered", slog.Any("source", source))
-			client := eventsource.NewClient(container, eventsource.ClientOptions{Source: source})
+			ctr := factory.Create(fmt.Sprintf("client-%s", source.ID))
+			ctr.Start(ctx)
+			client := eventsource.NewClient(ctr, eventsource.ClientOptions{Source: source})
 			err := discovery.NewWatchClient(ctx, eventsource.WatchConfig{Client: client, ID: source.ID, Timeout: time.Second * 30})
 			if err != nil {
 				slog.Error("discovery error", slog.Any("error", err))

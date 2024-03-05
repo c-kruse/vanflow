@@ -22,7 +22,8 @@ func TestClient(t *testing.T) {
 	t.Parallel()
 	tstCtx, tstCancel := context.WithCancel(context.Background())
 	defer tstCancel()
-	ctr, tstCtr := requireContainers(t)
+	factory := requireContainers(t)
+	ctr, tstCtr := factory.Create("client"), factory.Create("test")
 	ctr.Start(tstCtx)
 	tstCtr.Start(tstCtx)
 
@@ -98,7 +99,8 @@ func TestClient(t *testing.T) {
 }
 
 func TestClientFlush(t *testing.T) {
-	ctr, tstCtr := requireContainers(t)
+	factory := requireContainers(t)
+	ctr, tstCtr := factory.Create("client"), factory.Create("test")
 	ctr.Start(context.Background())
 	tstCtr.Start(context.Background())
 
@@ -213,11 +215,10 @@ func sendHeartbeatMessagesTo(t *testing.T, ctx context.Context, sender session.S
 	}
 }
 
-func requireContainers(t *testing.T) (session.Container, session.Container) {
+func requireContainers(t *testing.T) session.ContainerFactory {
 	t.Helper()
 	var (
-		app       session.Container
-		test      session.Container
+		factory   session.ContainerFactory
 		errNotSet = errors.New("QDR_ENDPOINT environment variable not present")
 	)
 	err := func() error {
@@ -249,19 +250,17 @@ func requireContainers(t *testing.T) (session.Container, session.Container) {
 		ping.Close(setupCtx)
 		pong.Close(setupCtx)
 
-		app = session.NewContainer(qdr, session.ContainerConfig{})
-		test = session.NewContainer(qdr, session.ContainerConfig{})
+		factory = session.NewContainerFactory(qdr, session.ContainerConfig{})
 		return nil
 	}()
 	if err != nil {
 		if testing.Short() || err == errNotSet {
-			rtr := session.NewMockRouter()
-			return session.NewMockContainer(rtr), session.NewMockContainer(rtr)
+			return session.NewMockContainerFactory()
 		}
 		t.Fatalf("failed to setup tests: %v", err)
 	}
 
-	return app, test
+	return factory
 }
 
 func uniqueSuffix(prefix string) string {

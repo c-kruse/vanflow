@@ -119,13 +119,9 @@ func main() {
 		connOpts.TLSConfig = tlsCfg
 		connOpts.SASLType = amqp.SASLTypeExternal("")
 	}
-	factory := func() session.Container {
-		return session.NewContainer(connURL, session.ContainerConfig{
-			Conn: connOpts,
-		})
-	}
+	factory := session.NewContainerFactory(connURL, session.ContainerConfig{Conn: connOpts})
 
-	var cmdHandler func(context.Context, ContainerFactory)
+	var cmdHandler func(context.Context, session.ContainerFactory)
 	switch name := flags.Arg(0); name {
 	case "log":
 		cmdHandler = logOnly
@@ -144,8 +140,6 @@ func main() {
 	defer cancel()
 	cmdHandler(ctx, factory)
 }
-
-type ContainerFactory func() session.Container
 
 type tlsConfig struct {
 	CA     string `json:"ca,omitempty"`
