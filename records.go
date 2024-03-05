@@ -160,6 +160,7 @@ func (r FlowRecord) GetTypeMeta() TypeMeta {
 
 type ProcessRecord struct {
 	BaseRecord
+	Parent       *string `vflow:"2"` //unspeced
 	Mode         *string `vflow:"13"`
 	SourceHost   *string `vflow:"14"`
 	ImageName    *string `vflow:"20"`
