@@ -1,12 +1,8 @@
 package session
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"testing"
 	"time"
@@ -113,13 +109,4 @@ func containersFromEnv(t *testing.T) ContainerFactory {
 	}
 
 	return factory
-}
-
-func randomSuffix(prefix string) string {
-	var salt [8]byte
-	io.ReadFull(rand.Reader, salt[:])
-	out := bytes.NewBuffer([]byte(prefix))
-	out.WriteByte('-')
-	hex.NewEncoder(out).Write(salt[:])
-	return out.String()
 }
