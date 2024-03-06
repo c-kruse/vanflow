@@ -84,6 +84,7 @@ type Interface interface {
 
 	List(ctx context.Context, opts *Selector) (Set, error)
 	Index(ctx context.Context, idx string, obj Entry, opts *Selector) (Set, error)
+	IndexValues(ctx context.Context, idx string) ([]string, error)
 
 	Replace(context.Context, []Entry) error
 }

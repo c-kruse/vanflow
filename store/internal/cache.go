@@ -132,6 +132,21 @@ func (m *SyncIndexedMap[T]) List() []VersionContainer[T] {
 	return list
 }
 
+func (m *SyncIndexedMap[T]) IndexValues(indexName string) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	indexer := m.indexers[indexName]
+	if indexer == nil {
+		return nil, fmt.Errorf("Index %q does not exist", indexName)
+	}
+	index := m.indicies[indexName]
+	values := make([]string, 0, len(index))
+	for value := range index {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
 func (m *SyncIndexedMap[T]) Index(indexName string, obj T) ([]VersionContainer[T], error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -153,6 +153,10 @@ func (c *objectCache) List(ctx context.Context, opts *Selector) (Set, error) {
 	return result, nil
 }
 
+func (c *objectCache) IndexValues(ctx context.Context, idx string) ([]string, error) {
+	return c.storage.IndexValues(idx)
+}
+
 func (c *objectCache) Index(ctx context.Context, idx string, obj Entry, opts *Selector) (Set, error) {
 	var result Set
 	all, err := c.storage.Index(idx, obj)
