@@ -1,6 +1,6 @@
 module github.com/c-kruse/vanflow
 
-go 1.21
+go 1.20
 
 require (
 	github.com/Azure/go-amqp v1.0.4
