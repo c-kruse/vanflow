@@ -100,7 +100,7 @@ func containersFromEnv(t *testing.T) ContainerFactory {
 		}
 		conn.Close()
 		factory = NewContainerFactory(qdr, ContainerConfig{
-			Conn: &amqp.ConnOptions{ContainerID: "tc/" + randomID()},
+			ContainerID: "tc/" + randomID(),
 		})
 		return nil
 	}()

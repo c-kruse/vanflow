@@ -252,7 +252,7 @@ func requireContainers(t *testing.T) session.ContainerFactory {
 
 		factory = session.NewContainerFactory(qdr,
 			session.ContainerConfig{
-				Conn: &amqp.ConnOptions{ContainerID: uniqueSuffix("eventsourcetest")},
+				ContainerID: uniqueSuffix("eventsourcetest"),
 			})
 		return nil
 	}()

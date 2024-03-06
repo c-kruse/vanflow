@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/Azure/go-amqp"
 	"github.com/c-kruse/vanflow/session"
 )
 
@@ -114,12 +113,11 @@ func main() {
 		}
 	}
 
-	connOpts := &amqp.ConnOptions{}
+	var sasl session.SASLType
 	if tlsCfg != nil {
-		connOpts.TLSConfig = tlsCfg
-		connOpts.SASLType = amqp.SASLTypeExternal("")
+		sasl = session.SASLTypeExternal
 	}
-	factory := session.NewContainerFactory(connURL, session.ContainerConfig{Conn: connOpts})
+	factory := session.NewContainerFactory(connURL, session.ContainerConfig{TLSConfig: tlsCfg, SASLType: sasl})
 
 	var cmdHandler func(context.Context, session.ContainerFactory)
 	switch name := flags.Arg(0); name {

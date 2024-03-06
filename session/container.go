@@ -6,6 +6,7 @@ package session
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -56,12 +57,34 @@ type Sender interface {
 	Close(context.Context) error
 }
 
+type SASLType string
+
+const (
+	SASLTypeExternal SASLType = "EXTERNAL"
+)
+
 type ContainerConfig struct {
-	Conn *amqp.ConnOptions
+	ContainerID  string
+	MaxFrameSize uint32
+	TLSConfig    *tls.Config
+	SASLType     SASLType
 	// BackOff strategy to use when reestablishing a connection defaults to an
 	// exponential backoff capped at 30 second intervals with no set retry
 	// limit.
 	BackOff backoff.BackOff
+}
+
+func (cfg ContainerConfig) toAmqp() *amqp.ConnOptions {
+	opts := amqp.ConnOptions{
+		ContainerID:  cfg.ContainerID,
+		MaxFrameSize: cfg.MaxFrameSize,
+		TLSConfig:    cfg.TLSConfig,
+	}
+	switch cfg.SASLType {
+	case SASLTypeExternal:
+		opts.SASLType = amqp.SASLTypeExternal("")
+	}
+	return &opts
 }
 
 // NewContainer creats an amqp container that will attempt to create a single
@@ -128,13 +151,14 @@ func (c *container) Start(ctx context.Context) {
 		b.Reset()
 		c.config.BackOff = b
 	}
+
 	go func() {
 		var generation int
 		var prevSessionTeardown func() = func() {}
 		b := backoff.WithContext(c.config.BackOff, ctx)
 		err := backoff.RetryNotify(
 			func() error {
-				conn, err := amqp.Dial(ctx, c.address, c.config.Conn)
+				conn, err := amqp.Dial(ctx, c.address, c.config.toAmqp())
 				if err != nil {
 					return fmt.Errorf("dial error: %s", err)
 				}
