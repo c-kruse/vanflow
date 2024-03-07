@@ -97,6 +97,18 @@ func (d *Discovery) Get(id string) (source Info, ok bool) {
 	return state, true
 }
 
+// Add an EventSource
+func (d *Discovery) Add(info Info) bool {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	if _, exists := d.state[info.ID]; exists {
+		return false
+	}
+	d.state[info.ID] = info
+	d.discovered <- info
+	return true
+}
+
 // Forget an EventSource
 func (d *Discovery) Forget(id string) bool {
 	var (
@@ -104,15 +116,12 @@ func (d *Discovery) Forget(id string) bool {
 		forget bool
 	)
 	d.lock.Lock()
-	// unlock then call onForget
-	defer func() {
-		d.lock.Unlock()
-		if forget {
-			d.forgotten <- state
-		}
-	}()
+	defer d.lock.Unlock()
 	state, forget = d.state[id]
 	delete(d.state, id)
+	if forget {
+		d.forgotten <- state
+	}
 	return forget
 }
 
@@ -254,13 +263,7 @@ func (d *Discovery) observe(beacon vanflow.BeaconMessage) {
 		discovered bool
 	)
 	d.lock.Lock()
-	// release lock before calling onDiscover
-	defer func() {
-		d.lock.Unlock()
-		if discovered {
-			d.discovered <- state
-		}
-	}()
+	defer d.lock.Unlock()
 	tObserved := time.Now()
 	state, ok := d.state[beacon.Identity]
 	if !ok {
@@ -276,6 +279,9 @@ func (d *Discovery) observe(beacon vanflow.BeaconMessage) {
 	}
 	state.LastSeen = tObserved
 	d.state[beacon.Identity] = state
+	if discovered {
+		d.discovered <- state
+	}
 }
 
 func (d *Discovery) lastSeen(id string, latest time.Time) {
