@@ -133,7 +133,7 @@ A tool to caputre vanflow state.
 	}
 
 	// Create Deployment
-	slog.Debug("creating deployment")
+	slog.Info("creating deployment...")
 	_, err = deploymentsClient.Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
 		panic(err)
@@ -142,10 +142,11 @@ A tool to caputre vanflow state.
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 		defer cancel()
-		slog.Debug("cleaning up deployment", slog.String("name", deployment.Name))
 		if err := deploymentsClient.Delete(cleanupCtx, deployment.Name, metav1.DeleteOptions{}); err != nil {
 			slog.Error("error cleaning up deployment", slog.String("name", deployment.Name), slog.Any("error", err))
+			return
 		}
+		slog.Info("deployment deleted.", slog.String("name", deployment.Name))
 	}()
 
 	b := backoff.WithContext(backoff.NewExponentialBackOff(), ctx)
@@ -199,7 +200,7 @@ A tool to caputre vanflow state.
 		}
 	}()
 
-	slog.Debug("waiting for vanflow state to accumulate", slog.String("delay", duration.String()))
+	slog.Info("deployment started. waiting for vanflow state to accumulate.", slog.String("delay", duration.String()))
 	timer := time.NewTimer(duration)
 	var ready bool
 READY:
@@ -240,9 +241,9 @@ READY:
 	}
 	defer resp.Body.Close()
 
-	slog.Debug("writing caputre file", slog.String("name", output))
+	slog.Debug("writing capture file", slog.String("name", output))
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		slog.Error("failed to write caputre file", slog.String("name", output), slog.Any("error", err))
+		slog.Error("failed to write capture file", slog.String("name", output), slog.Any("error", err))
 	}
 
 }
