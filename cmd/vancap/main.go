@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -29,33 +30,18 @@ var (
 	Duration string
 	Tag      string
 	Debug    bool
-
-	home = os.Getenv("HOME")
 )
 
-func main() {
-	flags.Usage = func() {
-		fmt.Printf(`Usage: %s [options...] <output file>
-
-A tool to caputre vanflow state.
-`, os.Args[0])
-		flags.PrintDefaults()
-	}
-	flags.StringVar(&Duration, "duration", "10s", "time to wait for vanflow capture in go time.Duration string format")
-	flags.StringVar(&Tag, "tag", "latest", "vanflow-tool image tag")
-	flags.BoolVar(&Debug, "debug", false, "enable debug logging")
-	flags.Parse(os.Args[1:])
+func Run(ctx context.Context) (int, bool) {
 	if len(flags.Args()) != 1 {
 		fmt.Printf("error: expected single argument for output file. got %v\n", flags.Args())
-		flags.Usage()
-		os.Exit(1)
+		return 1, true
 	}
 
 	duration, err := time.ParseDuration(Duration)
 	if err != nil {
 		fmt.Printf("error parsing duration: %s\n", err)
-		flags.Usage()
-		os.Exit(1)
+		return 1, true
 	}
 	if Debug {
 		logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -65,18 +51,16 @@ A tool to caputre vanflow state.
 	namespace, restcfg, clientset, err := setupKube()
 	if err != nil {
 		fmt.Printf("failed to get kube client %q: %s\n", namespace, err)
-		flags.Usage()
-		os.Exit(1)
+		return 1, true
 	}
 
-	ctx := context.Background()
 	deploymentsClient := clientset.AppsV1().Deployments(namespace)
 	podsClient := clientset.CoreV1().Pods(namespace)
+
 	_, err = deploymentsClient.Get(ctx, "skupper-router", metav1.GetOptions{})
 	if err != nil {
 		fmt.Printf("skupper not installed in namespace %q: %s\n", namespace, err)
-		flags.Usage()
-		os.Exit(1)
+		return 1, true
 	}
 
 	deployment := &appsv1.Deployment{
@@ -136,11 +120,12 @@ A tool to caputre vanflow state.
 	slog.Info("creating deployment...")
 	_, err = deploymentsClient.Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
-		panic(err)
+		slog.Error("error creating deployment", slog.String("name", deployment.Name), slog.Any("error", err))
+		return 1, false
 	}
 
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(ctx, time.Second*5)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 		defer cancel()
 		if err := deploymentsClient.Delete(cleanupCtx, deployment.Name, metav1.DeleteOptions{}); err != nil {
 			slog.Error("error cleaning up deployment", slog.String("name", deployment.Name), slog.Any("error", err))
@@ -157,27 +142,30 @@ A tool to caputre vanflow state.
 			return fmt.Errorf("deployment not found: %v", err)
 		}
 		if dep.Status.ReadyReplicas < 1 {
-			return fmt.Errorf("not ready...")
+			return fmt.Errorf("not ready")
 		}
 		return nil
 	}, b, func(err error, d time.Duration) {
 		slog.Debug("deployment not ready", slog.String("delay", d.String()), slog.Any("error", err))
 	})
-	slog.Debug("created deployment", slog.String("name", deployment.Name))
+	slog.Debug("deployment ready.", slog.String("name", deployment.Name))
 
 	pods, err := podsClient.List(ctx, metav1.ListOptions{
 		LabelSelector: "app=vanflow-server",
 	})
 	if err != nil {
 		slog.Error("failed to find deployment pod", slog.Any("error", err))
-		os.Exit(1)
+		return 1, false
 	}
 	first := pods.Items[0].Name
+
+	slog.Info("deployment started. waiting for vanflow state to accumulate.", slog.String("delay", duration.String()))
+	time.Sleep(duration)
 
 	roundTripper, upgrader, err := spdy.RoundTripperFor(restcfg)
 	if err != nil {
 		slog.Error("failed to create round tripper", slog.Any("error", err))
-		os.Exit(1)
+		return 1, false
 	}
 
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", namespace, first)
@@ -190,7 +178,7 @@ A tool to caputre vanflow state.
 	forwarder, err := portforward.New(dialer, []string{"9090"}, stopChan, readyChan, os.Stdout, os.Stderr)
 	if err != nil {
 		slog.Error("failed to create port forwarder", slog.Any("error", err))
-		os.Exit(1)
+		return 1, false
 	}
 	forwardErr := make(chan error, 1)
 	go func() {
@@ -199,45 +187,20 @@ A tool to caputre vanflow state.
 			forwardErr <- err
 		}
 	}()
-
-	slog.Info("deployment started. waiting for vanflow state to accumulate.", slog.String("delay", duration.String()))
-	timer := time.NewTimer(duration)
-	var ready bool
-READY:
-	for {
-		select {
-		case <-readyChan:
-			ready = true
-		case <-timer.C:
-			break READY
-		}
-	}
-	if !ready {
-		if duration < (5 * time.Second) {
-			select {
-			case <-readyChan:
-				ready = true
-			case <-time.After(5*time.Second - duration):
-			}
-		}
-		if !ready {
-			slog.Error("failed to start port forwarder", slog.Any("error", err))
-			os.Exit(1)
-		}
-	}
+	<-readyChan
 
 	output := flags.Arg(0)
 	f, err := os.Create(output)
 	if err != nil {
 		slog.Error("failed to create output file", slog.Any("error", err), slog.String("name", output))
-		os.Exit(1)
+		return 1, false
 	}
 	defer f.Close()
 	slog.Debug("requesting vanflow capture")
 	resp, err := http.Get("http://127.0.0.1:9090")
 	if err != nil {
 		slog.Error("error requesting vanflow capture", slog.Any("error", err), slog.String("name", output))
-		os.Exit(1)
+		return 1, false
 	}
 	defer resp.Body.Close()
 
@@ -246,6 +209,29 @@ READY:
 		slog.Error("failed to write capture file", slog.String("name", output), slog.Any("error", err))
 	}
 
+	return 0, false
+}
+
+func main() {
+	flags.Usage = func() {
+		fmt.Printf(`Usage: %s [options...] <output file>
+
+A tool to caputre vanflow state.
+`, os.Args[0])
+		flags.PrintDefaults()
+	}
+	flags.StringVar(&Duration, "duration", "10s", "time to wait for vanflow capture in go time.Duration string format")
+	flags.StringVar(&Tag, "tag", "latest", "vanflow-tool image tag")
+	flags.BoolVar(&Debug, "debug", false, "enable debug logging")
+	flags.Parse(os.Args[1:])
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	exit, usage := Run(ctx)
+	if usage {
+		flags.Usage()
+	}
+	os.Exit(exit)
 }
 
 func setupKube() (string, *rest.Config, kubernetes.Interface, error) {
