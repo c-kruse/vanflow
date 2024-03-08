@@ -1,0 +1,19 @@
+# kubectl apply -f skupper-fixture.yaml && kubectl patch deployment/skupper-service-controller --patch-file patch.yaml
+--- 
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skupper-service-controller
+spec:
+  template:
+    spec:
+      containers:
+      - name: flow-collector
+        volumeMounts:
+        - mountPath: /etc/messaging/
+          name: vanflow-fixture-local-client
+      volumes:
+      - name: vanflow-fixture-local-client
+        configMap:
+          defaultMode: 420
+          name: vanflow-fixture-local-client

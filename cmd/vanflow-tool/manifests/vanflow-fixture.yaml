@@ -1,9 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vanflow-fixture-local-client
+data:
+  connect.json: |+
+    {
+        "scheme": "amqp",
+        "host": "vanflow-fixture-router",
+        "port": "5672"
+    }
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vanflow-fixture
   labels:
     app: vanflow-fixture
+  name: vanflow-fixture
 spec:
   replicas: 1
   selector:
@@ -15,19 +28,59 @@ spec:
         app: vanflow-fixture
     spec:
       containers:
-      - image: quay.io/ckruse/vanflow-tool:latest
+      - args:
+        - -messaging-config=/etc/messaging/connect.json
+        - fixture
+        image: quay.io/ckruse/vanflow-tool:latest
         imagePullPolicy: Always
         name: main
+        resources: {}
         securityContext:
           runAsNonRoot: true
         volumeMounts:
         - mountPath: /etc/messaging/
           name: skupper-local-client
-        args:
-        - '-messaging-config=/etc/messaging/connect.json'
-        - 'fixture'
       volumes:
-      - name: skupper-local-client
-        secret:
+      - configMap:
           defaultMode: 420
-          secretName: skupper-local-client
+          name: vanflow-fixture-local-client
+        name: skupper-local-client
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: vanflow-fixture-router
+  name: vanflow-fixture-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vanflow-fixture-router
+  template:
+    metadata:
+      labels:
+        app: vanflow-fixture-router
+    spec:
+      containers:
+      - image: quay.io/ckruse/vanflow-qdr:latest
+        imagePullPolicy: Always
+        name: vanflow-qdr
+        ports:
+        - containerPort: 5672
+          protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: vanflow-fixture-router
+  name: vanflow-fixture-router
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5672
+    protocol: TCP
+    targetPort: 5672
+  selector:
+    app: vanflow-fixture-router
