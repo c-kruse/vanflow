@@ -65,7 +65,10 @@ func serveFixture(ctx context.Context, factory session.ContainerFactory) {
 		enc.Encode(response)
 	})
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		var managers []*eventsource.Manager
 		var (
 			manageCtx    context.Context
@@ -121,7 +124,23 @@ func serveFixture(ctx context.Context, factory session.ContainerFactory) {
 
 	loggingHandler := handlers.LoggingHandler(os.Stdout, http.DefaultServeMux)
 	slog.Info("Starting server on :9080")
-	http.ListenAndServe(":9080", loggingHandler)
+	srv := &http.Server{
+		Addr:    ":9080",
+		Handler: loggingHandler,
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error("server error", slog.Any("error", err))
+		}
+	}()
+	<-ctx.Done()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
+	wg.Wait()
 }
 
 func groupEntriesBySource(request ReplaceRequest) map[store.SourceRef][]store.Entry {

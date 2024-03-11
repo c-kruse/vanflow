@@ -168,8 +168,25 @@ func serveRecords(ctx context.Context, factory session.ContainerFactory) {
 		},
 	})
 	loggingHandler := handlers.LoggingHandler(os.Stdout, http.DefaultServeMux)
-	slog.Info("Starting server on :9090")
-	http.ListenAndServe(":9090", loggingHandler)
+	slog.Info("Starting server on :9080")
+	srv := &http.Server{
+		Addr:    ":9090",
+		Handler: loggingHandler,
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error("server error", slog.Any("error", err))
+		}
+	}()
+	<-ctx.Done()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
+	wg.Wait()
 }
 
 func newFixtureStore() store.Interface {
