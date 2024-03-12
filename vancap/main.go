@@ -82,6 +82,7 @@ A tool to caputre vanflow state.
 		fmt.Printf("caputre failed: %v\n", err)
 		os.Exit(1)
 	}
+
 }
 
 type Vancap struct {
@@ -128,6 +129,8 @@ func (v Vancap) Run(ctx context.Context) error {
 							},
 							Args: []string{
 								"-messaging-config=/etc/messaging/connect.json",
+								"-include-log-records=false",
+								"-debug",
 								"serve",
 							},
 							VolumeMounts: []apiv1.VolumeMount{
@@ -252,9 +255,11 @@ func (v Vancap) Run(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	slog.Debug("writing capture file", slog.String("name", v.Destination))
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	fLen, err := io.Copy(f, resp.Body)
+	if err != nil {
 		return fmt.Errorf("error writing capture file: %s", err)
 	}
+	slog.Info("Vanflow capture written.", slog.String("file", v.Destination), slog.Int("bytes", int(fLen)))
 
 	return nil
 }
