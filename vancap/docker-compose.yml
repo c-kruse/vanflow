@@ -1,0 +1,24 @@
+version: 4
+services:
+  console:
+    image: quay.io/ckruse/skupper/flow-collector:distinct-flow-collector-deployment
+    command:
+      - /app/flow-collector
+      - -enable-console
+      - -authmode=insecure
+    volumes: .static:/etc/messaging:ro,z
+    ports:
+      - "8010:8010"
+  router:
+    image: quay.io/ckruse/vanflow-qdr:latest
+  fixture:
+    image: quay.io/ckruse/vanflow-tool:latest
+    volumes: .static:/etc/messaging:ro,z
+    ports:
+      - "9080:9080"
+    command:
+      - -messaging-config=/etc/messaging/connect.json
+      - fixture
+  network-console-prometheus:
+    image: prom/prometheus:latest
+    volumes: .static:/etc/prometheus:ro,z

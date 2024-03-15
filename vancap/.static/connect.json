@@ -1,0 +1,6 @@
+{
+    "scheme": "amqp",
+    "host": "router",
+    "port": "5672"
+}
+
