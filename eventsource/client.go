@@ -149,12 +149,14 @@ func (c *Client) Listen(ctx context.Context, attributes ListenerConfigProvider) 
 					return
 				}
 				slog.Error("client error receiving message", slog.Any("error", err), slog.String("address", cfg.Address))
+				continue
 			}
 			if err := receiver.Accept(ctx, amqpMsg); err != nil {
 				if errors.Is(err, ctx.Err()) {
 					return
 				}
 				slog.Error("client error accepting message", slog.Any("error", err), slog.String("address", cfg.Address))
+				continue
 			}
 			decoded, err := vanflow.Decode(amqpMsg)
 			if err != nil {

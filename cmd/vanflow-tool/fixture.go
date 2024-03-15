@@ -18,6 +18,8 @@ import (
 )
 
 func serveFixture(ctx context.Context, factory session.ContainerFactory) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var statusMu sync.Mutex
 	status := "pending records"
 
@@ -135,6 +137,16 @@ func serveFixture(ctx context.Context, factory session.ContainerFactory) {
 			slog.Error("server error", slog.Any("error", err))
 		}
 	}()
+	container := factory.Create()
+	container.Start(ctx)
+	container.OnSessionError(func(err error) {
+		if _, ok := err.(session.RetryableError); !ok {
+			slog.Error("starting shutdown due to non-retryable container error", slog.Any("error", err))
+			cancel()
+			return
+		}
+		slog.Error("container session error", slog.Any("error", err))
+	})
 	<-ctx.Done()
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)

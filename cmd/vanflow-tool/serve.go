@@ -38,6 +38,8 @@ func getRecordTypes() []vanflow.Record {
 
 func serveRecords(ctx context.Context, factory session.ContainerFactory) {
 	slog.Debug("Starting to discover event sources")
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	recordTypes := getRecordTypes()
 	stor := newFixtureStore()
@@ -108,12 +110,23 @@ func serveRecords(ctx context.Context, factory session.ContainerFactory) {
 
 	container := factory.Create()
 	container.Start(ctx)
+	container.OnSessionError(func(err error) {
+		if _, ok := err.(session.RetryableError); !ok {
+			slog.Error("starting shutdown due to non-retryable container error", slog.Any("error", err))
+			cancel()
+			return
+		}
+		slog.Error("container session error", slog.Any("error", err))
+	})
 	discovery := eventsource.NewDiscovery(container, eventsource.DiscoveryOptions{})
 	go discovery.Run(ctx, eventsource.DiscoveryHandlers{
 		Discovered: func(source eventsource.Info) {
 			slog.Debug("source discovered", slog.Any("source", source))
 			ctr := factory.Create()
 			ctr.Start(ctx)
+			ctr.OnSessionError(func(err error) {
+				slog.Error("client container session error", slog.Any("error", err))
+			})
 			client := eventsource.NewClient(ctr, eventsource.ClientOptions{Source: source})
 			err := discovery.NewWatchClient(ctx, eventsource.WatchConfig{Client: client, ID: source.ID, Timeout: time.Second * 30})
 			if err != nil {

@@ -22,6 +22,9 @@ type mockContainer struct {
 func (c *mockContainer) Start(ctx context.Context) {
 }
 
+func (c *mockContainer) OnSessionError(func(error)) {
+}
+
 func (c *mockContainer) NewReceiver(address string, opts ReceiverOptions) Receiver {
 	cred := opts.Credit
 	if cred <= 0 {

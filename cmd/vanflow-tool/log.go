@@ -16,6 +16,8 @@ import (
 
 func logOnly(ctx context.Context, factory session.ContainerFactory) {
 	outputstream := make(chan Message, 64)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	heartbeatHandler := func(m vanflow.HeartbeatMessage) {
 		outputstream <- Message{
@@ -41,6 +43,14 @@ func logOnly(ctx context.Context, factory session.ContainerFactory) {
 
 	container := factory.Create()
 	container.Start(ctx)
+	container.OnSessionError(func(err error) {
+		if _, ok := err.(session.RetryableError); !ok {
+			slog.Error("starting shutdown due to non-retryable container error", slog.Any("error", err))
+			cancel()
+			return
+		}
+		slog.Error("container session error", slog.Any("error", err))
+	})
 
 	discovery := eventsource.NewDiscovery(container, eventsource.DiscoveryOptions{})
 	go discovery.Run(ctx, eventsource.DiscoveryHandlers{

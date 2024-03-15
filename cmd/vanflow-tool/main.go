@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/c-kruse/vanflow/session"
+	"github.com/cenkalti/backoff/v4"
 )
 
 var (
@@ -117,7 +119,13 @@ func main() {
 	if tlsCfg != nil {
 		sasl = session.SASLTypeExternal
 	}
-	factory := session.NewContainerFactory(connURL, session.ContainerConfig{TLSConfig: tlsCfg, SASLType: sasl})
+
+	containerBackoff := backoff.NewExponentialBackOff()
+	containerBackoff.MaxElapsedTime = 60 * time.Second
+	factory := session.NewContainerFactory(connURL, session.ContainerConfig{
+		TLSConfig: tlsCfg, SASLType: sasl,
+		BackOff: containerBackoff,
+	})
 
 	var cmdHandler func(context.Context, session.ContainerFactory)
 	switch name := flags.Arg(0); name {

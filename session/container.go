@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -44,6 +43,12 @@ type Container interface {
 	NewReceiver(address string, opts ReceiverOptions) Receiver
 	// NewSender adds a new sender link using the container's session
 	NewSender(address string, opts SenderOptions) Sender
+	// OnSessionError
+	OnSessionError(func(err error))
+}
+
+type RetryableError interface {
+	Retry() time.Duration
 }
 
 type Receiver interface {
@@ -107,13 +112,20 @@ type container struct {
 	address string
 	config  ContainerConfig
 
-	mu      sync.Mutex
-	sess    *amqp.Session
-	gen     int
-	hasNext chan struct{}
+	mu            sync.Mutex
+	sess          *amqp.Session
+	gen           int
+	hasNext       chan struct{}
+	errorHandlers []func(error)
 
 	sessionErrors chan sessionErr
 	notifyOK      chan int
+}
+
+func (c *container) OnSessionError(handler func(error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.errorHandlers = append(c.errorHandlers, handler)
 }
 
 func (c *container) awaitNextSession(ctx context.Context, prev int) (session *amqp.Session, gen int, err error) {
@@ -196,7 +208,12 @@ func (c *container) Start(ctx context.Context) {
 			},
 			b,
 			func(err error, d time.Duration) {
-				slog.Error("session error triggered restart", slog.String("delay", d.String()), slog.Any("error", err))
+				wErr := errSessionRestart{Err: err, D: d}
+				c.mu.Lock()
+				for _, handler := range c.errorHandlers {
+					handler(wErr)
+				}
+				c.mu.Unlock()
 			},
 		)
 		defer prevSessionTeardown()
@@ -204,9 +221,27 @@ func (c *container) Start(ctx context.Context) {
 			if errors.Is(err, ctx.Err()) {
 				return
 			}
-			slog.Error("container stopping", slog.Any("error", err))
+			wErr := fmt.Errorf("error caused contianer to close: %w", err)
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			for _, handler := range c.errorHandlers {
+				handler(wErr)
+			}
 		}
 	}()
+}
+
+type errSessionRestart struct {
+	Err error
+	D   time.Duration
+}
+
+func (e errSessionRestart) Error() string {
+	return fmt.Sprintf("session error: %s", e.Err)
+}
+
+func (e errSessionRestart) Retry() time.Duration {
+	return e.D
 }
 
 func (s *container) NewReceiver(address string, opts ReceiverOptions) Receiver {
