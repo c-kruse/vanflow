@@ -92,7 +92,7 @@ func (m *Manager) sendRecords(ctx context.Context) {
 			}
 			if err := sender.Send(ctx, msg); err != nil {
 				slog.Error("error sending event source record", slog.Any("error", err))
-				return
+				continue
 			}
 		}
 	}
