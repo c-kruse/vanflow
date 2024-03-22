@@ -181,7 +181,7 @@ func serveRecords(ctx context.Context, factory session.ContainerFactory) {
 		},
 	})
 	loggingHandler := handlers.LoggingHandler(os.Stdout, http.DefaultServeMux)
-	slog.Info("Starting server on :9080")
+	slog.Info("Starting server on :9090")
 	srv := &http.Server{
 		Addr:    ":9090",
 		Handler: loggingHandler,
