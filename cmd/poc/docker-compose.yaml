@@ -1,0 +1,12 @@
+version: 4
+services:
+  router-a:
+    image: quay.io/ckruse/vanflow-qdr:latest
+    volumes: .static/qdrouterd.conf.a:/etc/qpid-dispatch/qdrouterd.conf:ro,z
+    ports:
+      - "15672:5672"
+  router-b:
+    image: quay.io/ckruse/vanflow-qdr:latest
+    volumes: .static/qdrouterd.conf.b:/etc/qpid-dispatch/qdrouterd.conf:ro,z
+    ports:
+      - "25672:5672"
