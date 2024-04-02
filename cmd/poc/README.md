@@ -33,7 +33,7 @@ records a few times per second, and a collector that tries to keep pace. When
 interrupted (^C) the event source will stop the random mutations. A second
 interrupt will cause the source and collector to shut down and their states
 will be compared for differences before exiting.
-`poc -source-server amqp://127.0.0.1:15672 -collector-server amqp://127.0.0.1:25672`
+`poc -source-server amqp://127.0.0.1:15672 -collector-server amqp://127.0.0.1:15672,amqp://127.0.0.1:25672`
 
 Try breaking a connection and waiting for an error to be logged (or for `qdstat
 -c` to indicate the connection is gone) before undoing it. The collector should

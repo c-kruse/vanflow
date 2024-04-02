@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,7 +29,7 @@ var (
 
 func init() {
 	flags.StringVar(&SourceAmqp, "source-server", "amqp://127.0.0.1:5672", "AMQP server for the event source")
-	flags.StringVar(&CollectorAmqp, "collector-server", "amqp://127.0.0.1:5672", "AMQP server for the collector")
+	flags.StringVar(&CollectorAmqp, "collector-server", "amqp://127.0.0.1:5672", "Comma delimited list of AMQP server connection urls for the collector")
 	flags.BoolVar(&Debug, "debug", false, "print all messages observed")
 	flags.Parse(os.Args[1:])
 }
@@ -42,7 +43,11 @@ func main() {
 
 func run() error {
 	sourceFactory := session.NewContainerFactory(SourceAmqp, session.ContainerConfig{ContainerID: "source", BackOff: backoff.NewConstantBackOff(time.Millisecond * 500)})
-	collectorFactory := session.NewContainerFactory(CollectorAmqp, session.ContainerConfig{ContainerID: "collector", BackOff: backoff.NewConstantBackOff(time.Millisecond * 500)})
+	urls := strings.Split(CollectorAmqp, ",")
+	collectorFactories := make([]session.ContainerFactory, len(urls))
+	for i, url := range urls {
+		collectorFactories[i] = session.NewContainerFactory(url, session.ContainerConfig{ContainerID: "collector", BackOff: backoff.NewConstantBackOff(time.Millisecond * 500)})
+	}
 
 	interrupt := make(chan os.Signal, 2)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
@@ -57,10 +62,18 @@ func run() error {
 	go func() {
 		readFromSource(ctx, sourceFactory)
 	}()
-	observed := make(chan map[string]*vanflow.ProcessRecord, 1)
-	go func() {
-		observed <- runCollector(ctx, collectorFactory)
-	}()
+
+	type collectorResult struct {
+		ID    int
+		State map[string]*vanflow.ProcessRecord
+	}
+	observed := make(chan collectorResult, len(collectorFactories))
+	for i, factory := range collectorFactories {
+		go func(id int, f session.ContainerFactory) {
+			state := runCollector(ctx, id, f)
+			observed <- collectorResult{ID: id, State: state}
+		}(i, factory)
+	}
 
 	<-interrupt
 	close(done)
@@ -69,18 +82,27 @@ func run() error {
 	log.Print("Collector stopped. Awaiting results")
 	cancel()
 	a := <-actual
-	o := <-observed
-	if !cmp.Equal(a, o) {
-		log.Fatalf("expected and actual were different: %s", cmp.Diff(a, o))
+	diffs := make(map[int]string)
+	for range collectorFactories {
+		result := <-observed
+		if Debug {
+			log.Printf("Result for collector %d", result.ID)
+		}
+		if !cmp.Equal(a, result.State) {
+			diffs[result.ID] = cmp.Diff(a, result.State)
+		}
 	}
-	log.Print("OKAY!")
-
-	return nil
+	var err error
+	for id, diff := range diffs {
+		log.Printf("Collector state differed for collector %d: %q\n\t%s", id, urls[id], diff)
+		err = errors.New("collector state did not match source state")
+	}
+	return err
 }
 
 func readFromSource(ctx context.Context, factory session.ContainerFactory) {
 	container := factory.Create()
-	container.OnSessionError(func(err error) { log.Print(err) })
+	container.OnSessionError(func(err error) { log.Printf("SOURCEREADER session error: %s", err) })
 	container.Start(ctx)
 	rcv := container.NewReceiver("mc/sfe.testsource", session.ReceiverOptions{Credit: 256})
 	enc := json.NewEncoder(os.Stdout)
@@ -113,7 +135,7 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 	lastUpdatedState := make(map[string]sequenceInfo)
 
 	container := factory.Create()
-	container.OnSessionError(func(err error) { log.Print(err) })
+	container.OnSessionError(func(err error) { log.Printf("SOURCE session error: %s", err) })
 	container.Start(ctx)
 	flushRcv := container.NewReceiver("sfe.testsource", session.ReceiverOptions{Credit: 256})
 	recordSnd := container.NewSender("mc/sfe.testsource", session.SenderOptions{})
@@ -205,7 +227,11 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 				for i, key := range batch {
 					record, ok := recordState[key]
 					if !ok {
-						record = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(key, time.Now().Add(-1*time.Minute), lastUpdatedState[key].Finalized)}
+						finalized := time.Now()
+						if lastUpdated, ok := lastUpdatedState[key]; ok {
+							finalized = lastUpdated.Finalized
+						}
+						record = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(key, time.Now().Add(-1*time.Minute), finalized)}
 					}
 					records[i] = record
 				}
@@ -216,7 +242,7 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 				}
 				msg, err := recordMsg.Encode()
 				if err != nil {
-					panic(err)
+					continue
 				}
 				if err := recordSnd.Send(ctx, msg); err != nil {
 					panic(err)
@@ -300,11 +326,11 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 	}
 }
 
-func runCollector(ctx context.Context, factory session.ContainerFactory) map[string]*vanflow.ProcessRecord {
+func runCollector(ctx context.Context, id int, factory session.ContainerFactory) map[string]*vanflow.ProcessRecord {
 	recordState := make(map[string]*vanflow.ProcessRecord)
 
 	container := factory.Create()
-	container.OnSessionError(func(err error) { log.Print(err) })
+	container.OnSessionError(func(err error) { log.Printf("COLLECTOR-%d session error: %s", id, err) })
 	container.Start(ctx)
 	rcv := container.NewReceiver("mc/sfe.testsource", session.ReceiverOptions{Credit: 256})
 	flushSnd := container.NewSender("sfe.testsource", session.SenderOptions{})
@@ -319,9 +345,10 @@ func runCollector(ctx context.Context, factory session.ContainerFactory) map[str
 		for {
 			msg, err := rcv.Next(ctx)
 			if err != nil {
-				if !errors.Is(err, ctx.Err()) {
-					log.Printf("unexpected error receiving message: %s", err)
+				if errors.Is(err, ctx.Err()) {
+					return
 				}
+				log.Printf("COLLECTOR-%d: unexpected error receiving message: %s", id, err)
 				continue
 			}
 			rcv.Accept(ctx, msg)
@@ -335,16 +362,18 @@ func runCollector(ctx context.Context, factory session.ContainerFactory) map[str
 	}()
 
 	flushAndSync := func(head int64) {
-		var recordCount int
-		defer func() {
-			log.Printf("COLLECTOR: flush from sequence %d to %d. Got %d records", head, currentSequence, recordCount)
-		}()
-		if err := flushSnd.Send(ctx, vanflow.FlushMessage{
+		flushCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		if err := flushSnd.Send(flushCtx, vanflow.FlushMessage{
 			Head: head,
 		}.Encode()); err != nil {
-			log.Printf("unexpected error sending flush: %s", err)
+			log.Printf("COLLECTOR-%d: unexpected error sending flush: %s", id, err)
 			return
 		}
+		var recordCount int
+		defer func() {
+			log.Printf("COLLECTOR-%d: flush from sequence %d to %d. Got %d records", id, head, currentSequence, recordCount)
+		}()
 		for {
 			select {
 			case <-ctx.Done():
