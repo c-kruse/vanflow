@@ -49,6 +49,16 @@ func (b BaseRecord) Identity() string {
 	return b.ID
 }
 
+func (b BaseRecord) Terminated() bool {
+	if b.EndTime == nil {
+		return false
+	}
+	if b.StartTime == nil {
+		return true
+	}
+	return b.EndTime.After(b.StartTime.Time)
+}
+
 type Time struct {
 	time.Time
 }

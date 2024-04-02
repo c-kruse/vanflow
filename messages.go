@@ -47,6 +47,7 @@ type BeaconMessage struct {
 	Address    string
 	Direct     string
 	Identity   string
+	Instance   int64
 }
 
 func DecodeBeacon(msg *amqp.Message) BeaconMessage {
@@ -75,6 +76,9 @@ func DecodeBeacon(msg *amqp.Message) BeaconMessage {
 	if identity, ok := msg.ApplicationProperties["id"].(string); ok {
 		m.Identity = identity
 	}
+	if instance, ok := msg.ApplicationProperties["instance"].(int64); ok {
+		m.Instance = instance
+	}
 	return m
 }
 
@@ -90,6 +94,7 @@ func (m BeaconMessage) Encode() *amqp.Message {
 			"address":    m.Address,
 			"direct":     m.Direct,
 			"id":         m.Identity,
+			"instance":   m.Instance,
 		},
 	}
 }
@@ -105,6 +110,8 @@ type HeartbeatMessage struct {
 	Identity string
 	Version  uint32
 	Now      uint64
+	Instance int64
+	Head     int64
 }
 
 func DecodeHeartbeat(msg *amqp.Message) HeartbeatMessage {
@@ -125,6 +132,12 @@ func DecodeHeartbeat(msg *amqp.Message) HeartbeatMessage {
 	if identity, ok := msg.ApplicationProperties["id"].(string); ok {
 		m.Identity = identity
 	}
+	if instance, ok := msg.ApplicationProperties["instance"].(int64); ok {
+		m.Instance = instance
+	}
+	if head, ok := msg.ApplicationProperties["head"].(int64); ok {
+		m.Head = head
+	}
 	return m
 }
 
@@ -136,15 +149,18 @@ func (m HeartbeatMessage) Encode() *amqp.Message {
 			Subject: &heartbeatSubject,
 		},
 		ApplicationProperties: map[string]interface{}{
-			"v":   m.Version,
-			"now": m.Now,
-			"id":  m.Identity,
+			"v":        m.Version,
+			"now":      m.Now,
+			"id":       m.Identity,
+			"instance": m.Instance,
+			"head":     m.Head,
 		},
 	}
 }
 
 type FlushMessage struct {
 	MessageProps
+	Head int64
 }
 
 func DecodeFlush(msg *amqp.Message) FlushMessage {
@@ -158,6 +174,9 @@ func DecodeFlush(msg *amqp.Message) FlushMessage {
 	if msg.Properties.ReplyTo != nil {
 		flush.ReplyTo = *msg.Properties.ReplyTo
 	}
+	if head, ok := msg.ApplicationProperties["head"].(int64); ok {
+		flush.Head = head
+	}
 	return flush
 }
 
@@ -168,12 +187,17 @@ func (m FlushMessage) Encode() *amqp.Message {
 			ReplyTo: &m.ReplyTo,
 			Subject: &flushSubject,
 		},
+		ApplicationProperties: map[string]interface{}{
+			"head": m.Head,
+		},
 	}
 }
 
 type RecordMessage struct {
 	MessageProps
-	Records []Record
+	Records  []Record
+	Instance int64
+	Sequence int64
 }
 
 func DecodeRecord(msg *amqp.Message) (record RecordMessage, err error) {
@@ -182,6 +206,12 @@ func DecodeRecord(msg *amqp.Message) (record RecordMessage, err error) {
 	}
 	if msg.Properties.Subject != nil {
 		record.Subject = *msg.Properties.Subject
+	}
+	if instance, ok := msg.ApplicationProperties["instance"].(int64); ok {
+		record.Instance = instance
+	}
+	if sequence, ok := msg.ApplicationProperties["sequence"].(int64); ok {
+		record.Sequence = sequence
 	}
 	record.Records, err = decodeRecords(msg)
 	return record, err
@@ -200,6 +230,10 @@ func (m RecordMessage) Encode() (*amqp.Message, error) {
 		Properties: &amqp.MessageProperties{
 			To:      &m.To,
 			Subject: &recordSubject,
+		},
+		ApplicationProperties: map[string]interface{}{
+			"instance": m.Instance,
+			"sequence": m.Sequence,
 		},
 		Value: records,
 	}, nil
