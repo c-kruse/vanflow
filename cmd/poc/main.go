@@ -70,6 +70,7 @@ func run() error {
 	observed := make(chan collectorResult, len(collectorFactories))
 	for i, factory := range collectorFactories {
 		go func(id int, f session.ContainerFactory) {
+			time.Sleep(time.Duration(rand.Float64() * float64(10*time.Second)))
 			state := runCollector(ctx, id, f)
 			observed <- collectorResult{ID: id, State: state}
 		}(i, factory)
@@ -163,7 +164,7 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 	var (
 		nRecords        int
 		currentSequence int64
-		interval        time.Duration = time.Millisecond * 100
+		interval        time.Duration = time.Millisecond * 20
 		jitter          float64       = 2.5
 	)
 	nextRecordID := func() string {
@@ -187,7 +188,7 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 		return ""
 	}
 
-	for i := 0; i < 128; i++ {
+	for i := 0; i < 512; i++ {
 		id := nextRecordID()
 		recordState[id] = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(id, time.Now().Truncate(time.Microsecond))}
 	}
@@ -242,13 +243,15 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 				}
 				msg, err := recordMsg.Encode()
 				if err != nil {
-					continue
+					panic(err)
 				}
 				if err := recordSnd.Send(ctx, msg); err != nil {
 					panic(err)
 				}
 				for _, key := range batch {
-					lastUpdatedState[key] = sequenceInfo{Sequence: currentSequence}
+					lu := lastUpdatedState[key]
+					lu.Sequence = currentSequence
+					lastUpdatedState[key] = lu
 				}
 				keys = keys[len(batch):]
 			}
