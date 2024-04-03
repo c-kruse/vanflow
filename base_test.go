@@ -12,11 +12,12 @@ func TestTimeEncoding(t *testing.T) {
 
 	now := time.Now().Truncate(time.Microsecond)
 	testCases := []struct {
-		Name         string
-		In           any
-		DecodeError  string
-		EncodeError  string
-		HandleOutput func(*testing.T, map[interface{}]interface{})
+		Name           string
+		In             any
+		DecodeError    string
+		EncodeError    string
+		NotDeeplyEqual bool
+		HandleOutput   func(*testing.T, map[interface{}]interface{})
 	}{
 		{
 			Name: "basic",
@@ -54,6 +55,19 @@ func TestTimeEncoding(t *testing.T) {
 				attrs[uint32(3)] = "yahoo"
 			},
 			EncodeError: `expected type uint64 for timestamp but got string`,
+		}, {
+			Name:           "Ignores Zero Time",
+			NotDeeplyEqual: true,
+			In: &LinkRecord{
+				BaseRecord: NewBase("i", time.Time{}, time.UnixMicro(0)),
+			},
+			HandleOutput: func(t *testing.T, attrs map[interface{}]interface{}) {
+				_, ok := attrs[uint32(3)]
+				assert.Assert(t, !ok)
+				endTime, ok := attrs[uint32(4)]
+				assert.Assert(t, ok)
+				assert.Equal(t, endTime, uint64(0))
+			},
 		},
 	}
 	for _, tc := range testCases {
@@ -73,6 +87,9 @@ func TestTimeEncoding(t *testing.T) {
 				return
 			}
 			assert.Check(t, err)
+			if tc.NotDeeplyEqual {
+				return
+			}
 			assert.DeepEqual(t, tc.In, duplicate)
 		})
 	}

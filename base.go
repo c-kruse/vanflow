@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/c-kruse/vanflow/encoding"
 )
 
 type TypeMeta struct {
@@ -52,6 +54,9 @@ type Time struct {
 }
 
 func (t Time) EncodeRecordAttribute() (any, error) {
+	if t.Time.IsZero() {
+		return nil, encoding.ErrAttributeNotSet
+	}
 	ts := t.Time.UnixMicro()
 	if ts < 0 {
 		return nil, fmt.Errorf("cannot represent times before epoch in this encoding: %d", ts)
