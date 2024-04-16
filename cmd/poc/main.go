@@ -162,10 +162,9 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 	}()
 
 	var (
-		nRecords        int
-		currentSequence int64
-		interval        time.Duration = time.Millisecond * 20
-		jitter          float64       = 2.5
+		nRecords       int
+		changeInterval time.Duration = time.Millisecond * 20
+		jitter         float64       = 2.5
 	)
 	nextRecordID := func() string {
 		nRecords++
@@ -173,8 +172,8 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 	}
 
 	r := rand.New(rand.NewSource(time.Now().Unix()))
-	nextDelay := func() time.Duration {
-		return time.Duration(float64(interval) * (r.Float64() * jitter))
+	nextDelay := func(base time.Duration) time.Duration {
+		return time.Duration(float64(base) * (r.Float64() * jitter))
 	}
 
 	randomRecord := func() string {
@@ -188,149 +187,173 @@ func runSource(ctx context.Context, factory session.ContainerFactory, done <-cha
 		return ""
 	}
 
-	for i := 0; i < 512; i++ {
-		id := nextRecordID()
-		recordState[id] = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(id, time.Now().Truncate(time.Microsecond))}
-	}
+	run := func() {
+		clear(recordState)
+		var currentSequence int64
+		startTime := time.Now()
+		instance := startTime.Unix()
+		for i := 0; i < 512; i++ {
+			id := nextRecordID()
+			recordState[id] = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(id, time.Now().Truncate(time.Microsecond))}
+		}
 
-	tAction := time.NewTimer(nextDelay())
-	defer tAction.Stop()
-	heartbeatTimer := time.NewTicker(time.Second * 2)
-	for {
-		select {
-		case <-ctx.Done():
-			return recordState
-		case <-done:
-			done = nil
-			if !tAction.Stop() {
-				<-tAction.C
-			}
-		case f := <-flushes:
-			var keys []string
-			if f.Head == 0 {
-				keys = make([]string, 0, len(recordState))
-				for key := range recordState {
-					keys = append(keys, key)
+		tRestart := time.NewTimer(nextDelay(120 * time.Second))
+		defer tRestart.Stop()
+		tAction := time.NewTimer(nextDelay(changeInterval))
+		defer tAction.Stop()
+		heartbeatTimer := time.NewTicker(time.Second * 2)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-tRestart.C:
+				log.Printf("SOURCE: restarting instance %d after %s", instance, now.Sub(startTime))
+				return
+			case <-done:
+				done = nil
+				if !tAction.Stop() {
+					<-tAction.C
 				}
-			} else {
-				for key, s := range lastUpdatedState {
-					if s.Sequence > f.Head {
+			case f := <-flushes:
+				var keys []string
+				if f.Head == 0 {
+					keys = make([]string, 0, len(recordState))
+					for key := range recordState {
 						keys = append(keys, key)
 					}
-				}
-			}
-			for len(keys) > 0 {
-				batch := keys
-				if len(batch) > 10 {
-					batch = batch[:10]
-				}
-				records := make([]vanflow.Record, len(batch))
-				for i, key := range batch {
-					record, ok := recordState[key]
-					if !ok {
-						finalized := time.Now()
-						if lastUpdated, ok := lastUpdatedState[key]; ok {
-							finalized = lastUpdated.Finalized
+				} else {
+					for key, s := range lastUpdatedState {
+						if s.Sequence > f.Head {
+							keys = append(keys, key)
 						}
-						record = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(key, time.Now().Add(-1*time.Minute), finalized)}
 					}
-					records[i] = record
 				}
-				currentSequence++
-				recordMsg := vanflow.RecordMessage{
-					Records:  records,
-					Sequence: currentSequence,
+				for len(keys) > 0 {
+					batch := keys
+					if len(batch) > 10 {
+						batch = batch[:10]
+					}
+					records := make([]vanflow.Record, len(batch))
+					for i, key := range batch {
+						record, ok := recordState[key]
+						if !ok {
+							finalized := time.Now()
+							if lastUpdated, ok := lastUpdatedState[key]; ok {
+								finalized = lastUpdated.Finalized
+							}
+							record = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(key, time.Now().Add(-1*time.Minute), finalized)}
+						}
+						records[i] = record
+					}
+					currentSequence++
+					recordMsg := vanflow.RecordMessage{
+						Records:  records,
+						Sequence: currentSequence,
+						Instance: instance,
+					}
+					msg, err := recordMsg.Encode()
+					if err != nil {
+						panic(err)
+					}
+					if err := recordSnd.Send(ctx, msg); err != nil {
+						panic(err)
+					}
+					for _, key := range batch {
+						lu := lastUpdatedState[key]
+						lu.Sequence = currentSequence
+						lastUpdatedState[key] = lu
+					}
+					keys = keys[len(batch):]
 				}
-				msg, err := recordMsg.Encode()
-				if err != nil {
-					panic(err)
-				}
-				if err := recordSnd.Send(ctx, msg); err != nil {
-					panic(err)
-				}
-				for _, key := range batch {
-					lu := lastUpdatedState[key]
-					lu.Sequence = currentSequence
-					lastUpdatedState[key] = lu
-				}
-				keys = keys[len(batch):]
-			}
-			// send bookmark heartbeat to indicate flush is over
-			if err := recordSnd.Send(ctx, vanflow.HeartbeatMessage{
-				Identity: "testsource",
-				Now:      uint64(time.Now().UnixMicro()),
-				Head:     currentSequence,
-			}.Encode()); err != nil {
-				log.Printf("source send error: %s", err)
-			}
-			log.Printf("SOURCE: flushed from %d to %d", f.Head, currentSequence)
-		case <-heartbeatTimer.C:
-			if err := recordSnd.Send(ctx, vanflow.HeartbeatMessage{
-				Identity: "testsource",
-				Now:      uint64(time.Now().UnixMicro()),
-				Head:     currentSequence,
-			}.Encode()); err != nil {
-				log.Printf("source send error: %s", err)
-			}
-		case <-tAction.C:
-			tAction.Reset(nextDelay())
-			n := r.Float64() * 100
-			switch {
-			case n < 25: // terminate a record
-				key := randomRecord()
-				record := recordState[key]
-				delete(recordState, key)
-				record.EndTime = &vanflow.Time{Time: time.Now()}
-				currentSequence++
-				msg, err := vanflow.RecordMessage{
-					Sequence: currentSequence,
-					Records:  []vanflow.Record{record},
-				}.Encode()
-				if err != nil {
-					panic(err)
-				}
-				if err := recordSnd.Send(ctx, msg); err != nil {
+				// send bookmark heartbeat to indicate flush is over
+				if err := recordSnd.Send(ctx, vanflow.HeartbeatMessage{
+					Identity: "testsource",
+					Now:      uint64(time.Now().UnixMicro()),
+					Head:     currentSequence,
+					Instance: instance,
+				}.Encode()); err != nil {
 					log.Printf("source send error: %s", err)
 				}
-				lastUpdatedState[key] = sequenceInfo{Sequence: currentSequence, Finalized: time.Now()}
-			case n < 55: // add a new record
-				id := nextRecordID()
-				recordState[id] = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(id, time.Now().Truncate(time.Microsecond))}
-				currentSequence++
-				msg, err := vanflow.RecordMessage{
-					Sequence: currentSequence,
-					Records:  []vanflow.Record{recordState[id]},
-				}.Encode()
-				if err != nil {
-					panic(err)
-				}
-				if err := recordSnd.Send(ctx, msg); err != nil {
+				log.Printf("SOURCE: flushed from %d to %d", f.Head, currentSequence)
+			case <-heartbeatTimer.C:
+				if err := recordSnd.Send(ctx, vanflow.HeartbeatMessage{
+					Identity: "testsource",
+					Now:      uint64(time.Now().UnixMicro()),
+					Head:     currentSequence,
+					Instance: instance,
+				}.Encode()); err != nil {
 					log.Printf("source send error: %s", err)
 				}
-				lastUpdatedState[id] = sequenceInfo{Sequence: currentSequence}
-			default: // update a single record
-				key := randomRecord()
-				name := fmt.Sprintf("recordname-%d", time.Now().Unix())
-				recordState[key].Name = &name
-				currentSequence++
-				msg, err := vanflow.RecordMessage{
-					Sequence: currentSequence,
-					Records:  []vanflow.Record{recordState[key]},
-				}.Encode()
-				if err != nil {
-					panic(err)
+			case <-tAction.C:
+				tAction.Reset(nextDelay(changeInterval))
+				n := r.Float64() * 100
+				switch {
+				case n < 25: // terminate a record
+					key := randomRecord()
+					record := recordState[key]
+					delete(recordState, key)
+					record.EndTime = &vanflow.Time{Time: time.Now()}
+					currentSequence++
+					msg, err := vanflow.RecordMessage{
+						Sequence: currentSequence,
+						Records:  []vanflow.Record{record},
+						Instance: instance,
+					}.Encode()
+					if err != nil {
+						panic(err)
+					}
+					if err := recordSnd.Send(ctx, msg); err != nil {
+						log.Printf("source send error: %s", err)
+					}
+					lastUpdatedState[key] = sequenceInfo{Sequence: currentSequence, Finalized: time.Now()}
+				case n < 55: // add a new record
+					id := nextRecordID()
+					recordState[id] = &vanflow.ProcessRecord{BaseRecord: vanflow.NewBase(id, time.Now().Truncate(time.Microsecond))}
+					currentSequence++
+					msg, err := vanflow.RecordMessage{
+						Sequence: currentSequence,
+						Records:  []vanflow.Record{recordState[id]},
+						Instance: instance,
+					}.Encode()
+					if err != nil {
+						panic(err)
+					}
+					if err := recordSnd.Send(ctx, msg); err != nil {
+						log.Printf("source send error: %s", err)
+					}
+					lastUpdatedState[id] = sequenceInfo{Sequence: currentSequence}
+				default: // update a single record
+					key := randomRecord()
+					name := fmt.Sprintf("recordname-%d", time.Now().Unix())
+					recordState[key].Name = &name
+					currentSequence++
+					msg, err := vanflow.RecordMessage{
+						Sequence: currentSequence,
+						Records:  []vanflow.Record{recordState[key]},
+						Instance: instance,
+					}.Encode()
+					if err != nil {
+						panic(err)
+					}
+					if err := recordSnd.Send(ctx, msg); err != nil {
+						log.Printf("source send error: %s", err)
+					}
+					lastUpdatedState[key] = sequenceInfo{Sequence: currentSequence}
 				}
-				if err := recordSnd.Send(ctx, msg); err != nil {
-					log.Printf("source send error: %s", err)
-				}
-				lastUpdatedState[key] = sequenceInfo{Sequence: currentSequence}
 			}
 		}
 	}
+
+	for ctx.Err() == nil {
+		run()
+	}
+
+	return recordState
 }
 
 func runCollector(ctx context.Context, id int, factory session.ContainerFactory) map[string]*vanflow.ProcessRecord {
 	recordState := make(map[string]*vanflow.ProcessRecord)
+	var currentInstance int64
 
 	container := factory.Create()
 	container.OnSessionError(func(err error) { log.Printf("COLLECTOR-%d session error: %s", id, err) })
@@ -384,9 +407,15 @@ func runCollector(ctx context.Context, id int, factory session.ContainerFactory)
 			case recordMsg := <-msgs:
 				switch m := recordMsg.(type) {
 				case vanflow.HeartbeatMessage:
+					if m.Instance != currentInstance {
+						return
+					}
 					currentSequence = m.Head
 					return
 				case vanflow.RecordMessage:
+					if m.Instance != currentInstance {
+						return
+					}
 					for _, record := range m.Records {
 						recordCount++
 						pr := record.(*vanflow.ProcessRecord)
@@ -410,11 +439,23 @@ func runCollector(ctx context.Context, id int, factory session.ContainerFactory)
 		case recordMsg := <-msgs:
 			switch m := recordMsg.(type) {
 			case vanflow.HeartbeatMessage:
+				if m.Instance != currentInstance {
+					clear(recordState)
+					currentInstance = m.Instance
+					flushAndSync(0)
+					continue
+				}
 				if m.Head != currentSequence {
 					flushAndSync(currentSequence)
 					continue
 				}
 			case vanflow.RecordMessage:
+				if m.Instance != currentInstance {
+					clear(recordState)
+					currentInstance = m.Instance
+					flushAndSync(0)
+					continue
+				}
 				if m.Sequence != currentSequence+1 {
 					flushAndSync(currentSequence)
 					continue
