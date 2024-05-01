@@ -149,6 +149,8 @@ type FlowRecord struct {
 	OctetsUnacked  *uint64 `vflow:"37"`
 	WindowClosures *uint64 `vflow:"38"`
 	WindowSize     *uint64 `vflow:"39"`
+	Method         *string `vflow:"27"`
+	Result         *string `vflow:"28"`
 }
 
 func (r FlowRecord) GetTypeMeta() TypeMeta {
