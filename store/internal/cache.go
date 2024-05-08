@@ -49,7 +49,8 @@ func (m *SyncIndexedMap[T]) Patch(key string, patcher Patcher[T], cond ...Cond[T
 	}
 	var prev *T
 	if ok {
-		prev = &cc.Resource
+		tmp := cc.Resource // copy of Resource
+		prev = &tmp
 	}
 	obj, err := patcher.Patch(prev)
 	if err != nil {
@@ -76,7 +77,8 @@ func (m *SyncIndexedMap[T]) Update(key string, obj T, cond ...Cond[T]) (Delta[T]
 	}
 	var prev *T
 	if ok {
-		prev = &cc.Resource
+		tmp := cc.Resource // copy of Resource
+		prev = &tmp
 	}
 	cc.Resource = obj
 	cc.Version++
@@ -112,6 +114,7 @@ func (m *SyncIndexedMap[T]) Replace(items map[string]T) {
 	for k, v := range items {
 		prevcc := m.items[k]
 		prevcc.Resource = v
+		prevcc.Version++
 		itemcc[k] = prevcc
 	}
 	m.items = itemcc

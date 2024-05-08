@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/c-kruse/vanflow"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"gotest.tools/assert"
 )
 
@@ -187,6 +188,158 @@ func TestConditionalUpdate(t *testing.T) {
 	assert.ErrorContains(t, err, "update condition error")
 }
 
+func TestCacheEventHandlers(t *testing.T) {
+	ctx := context.TODO()
+	stubSite := func(name string) *vanflow.SiteRecord {
+		return &vanflow.SiteRecord{BaseRecord: vanflow.NewBase(name)}
+	}
+	addNotExpected := func(t *testing.T) func(Entry) {
+		return func(Entry) {
+			t.Error("unexpected call to OnAdd")
+		}
+	}
+	changeNotExpected := func(t *testing.T) func(Entry, Entry) {
+		return func(_, _ Entry) {
+			t.Fatal("unexpected call to OnChange")
+		}
+	}
+	deleteNotExpected := func(t *testing.T) func(Entry) {
+		return func(Entry) {
+			t.Error("unexpected call to OnDelete")
+		}
+	}
+	testCases := []struct {
+		Name         string
+		ExpectAdd    func(t *testing.T) func(Entry)
+		ExpectChange func(t *testing.T) func(prev, actual Entry)
+		ExpectDelete func(t *testing.T) func(Entry)
+		InitialState []Entry
+		Do           func(stor Interface)
+	}{
+		{
+			Name: "Add Record",
+			Do: func(stor Interface) {
+				stor.Add(ctx, Entry{
+					Record: stubSite("site-a"),
+				})
+			},
+			ExpectAdd: func(t *testing.T) func(Entry) {
+				return func(actual Entry) {
+					assert.DeepEqual(t, actual, Entry{
+						Record: stubSite("site-a"),
+					}, cmpopts.IgnoreFields(Metadata{}, "UpdatedAt"))
+				}
+			},
+		}, {
+			Name: "Re-Add Record NOOP",
+			InitialState: []Entry{
+				{Record: stubSite("site-a")},
+			},
+			Do: func(stor Interface) {
+				stor.Add(ctx, Entry{
+					Record: stubSite("site-a"),
+				})
+			},
+		}, {
+			Name: "Update Record",
+			InitialState: []Entry{
+				{Record: stubSite("site-a")},
+			},
+			Do: func(stor Interface) {
+				site := stubSite("site-a")
+				site.Platform = ptrTo("kazoo")
+				stor.Update(ctx, Entry{
+					Record: site,
+				})
+			},
+			ExpectChange: func(t *testing.T) func(Entry, Entry) {
+				return func(prev, curr Entry) {
+					assert.DeepEqual(t, prev, Entry{
+						Record: stubSite("site-a"),
+					}, cmpopts.IgnoreFields(Metadata{}, "UpdatedAt"))
+
+					expected := stubSite("site-a")
+					expected.Platform = ptrTo("kazoo")
+					assert.DeepEqual(t, curr, Entry{
+						Record: expected,
+					}, cmpopts.IgnoreFields(Metadata{}, "UpdatedAt"))
+				}
+			},
+		}, {
+			Name: "Accumulate Record",
+			InitialState: []Entry{
+				{
+					Meta: Metadata{
+						Annotations: map[string]string{"v": "1"},
+					},
+					Record: stubSite("site-a"),
+				},
+			},
+			Do: func(stor Interface) {
+				site := stubSite("site-a")
+				site.Platform = ptrTo("kazoo")
+				stor.Accumulate(SourceRef{}, site)
+			},
+			ExpectChange: func(t *testing.T) func(Entry, Entry) {
+				return func(prev, curr Entry) {
+					assert.DeepEqual(t, prev, Entry{
+						Meta:   Metadata{Annotations: map[string]string{"v": "1"}},
+						Record: stubSite("site-a"),
+					}, cmpopts.IgnoreFields(Metadata{}, "UpdatedAt"))
+
+					expected := stubSite("site-a")
+					expected.Platform = ptrTo("kazoo")
+					assert.DeepEqual(t, curr, Entry{
+						Meta:   Metadata{Annotations: map[string]string{"v": "1"}},
+						Record: expected,
+					}, cmpopts.IgnoreFields(Metadata{}, "UpdatedAt"))
+				}
+			},
+		}, {
+			Name: "Delete Record",
+			InitialState: []Entry{
+				{Record: stubSite("site-a")},
+			},
+			Do: func(stor Interface) {
+				stor.Delete(ctx, Entry{
+					Record: stubSite("site-a"),
+				})
+			},
+			ExpectDelete: func(t *testing.T) func(Entry) {
+				return func(actual Entry) {
+					assert.DeepEqual(t, actual, Entry{
+						Record: stubSite("site-a"),
+					}, cmpopts.IgnoreFields(Metadata{}, "UpdatedAt"))
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			if tc.ExpectAdd == nil {
+				tc.ExpectAdd = addNotExpected
+			}
+			if tc.ExpectChange == nil {
+				tc.ExpectChange = changeNotExpected
+			}
+			if tc.ExpectDelete == nil {
+				tc.ExpectDelete = deleteNotExpected
+			}
+
+			cache := NewDefaultCachingStore(CacheConfig{
+				EventHandlers: EventHandlerFuncs{
+					OnAdd:    tc.ExpectAdd(t),
+					OnChange: tc.ExpectChange(t),
+					OnDelete: tc.ExpectDelete(t),
+				},
+			})
+
+			cache.Replace(ctx, tc.InitialState)
+			tc.Do(cache)
+		})
+	}
+}
 func ptrTo[T any](direct T) *T {
 	return &direct
 }
