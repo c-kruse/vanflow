@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -23,6 +24,11 @@ var (
 )
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
+		fmt.Fprint(flag.CommandLine.Output(), "Adds amqp listeners to participate in the vanflow protocol. Is not particularily quick about it.\n")
+		flag.PrintDefaults()
+	}
 	flag.StringVar(&address, "router-address", "amqp://127.0.0.1:5672", "AMQP endpoint")
 	flag.StringVar(&address, "router-container-id", "slowboi", "amqp container id")
 
