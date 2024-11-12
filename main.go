@@ -32,7 +32,7 @@ func main() {
 	flag.StringVar(&address, "router-address", "amqp://127.0.0.1:5672", "AMQP endpoint")
 	flag.StringVar(&address, "router-container-id", "slowboi", "amqp container id")
 
-	flag.IntVar(&limit, "limit", 0, "Rate limit. AMQP Messages accepted per 60 seconds")
+	flag.IntVar(&limit, "limit", 60, "Rate limit. AMQP Messages accepted per 60 seconds")
 	flag.Parse()
 
 	var (
